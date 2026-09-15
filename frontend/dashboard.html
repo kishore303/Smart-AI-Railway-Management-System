@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SIH26027 — Railway Block Planning | Government of India</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;font-family:"Inter",system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  body{background:#f8fafc;color:#0f172a}
+  header{background:#0f265c;color:#fff;padding:12px 24px;display:flex;justify-content:space-between;align-items:center}
+  header h1{font-size:16px;letter-spacing:.3px}
+  header span{font-size:12px;opacity:.9}
+  nav{display:flex;gap:16px;padding:10px 24px;background:#fff;border-bottom:1px solid #e2e8f0;font-size:13px}
+  nav a{color:#0f265c;text-decoration:none;font-weight:600}
+  .wrap{padding:18px 24px}
+  .breadcrumbs{font-size:12px;color:#64748b;margin-bottom:12px}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+  .card{background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:14px}
+  .card h3{font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.5px}
+  .card .val{font-size:22px;font-weight:700;margin-top:6px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700}
+  .badge-green{background:#dcfce7;color:#166534}
+  .badge-amber{background:#fef3c7;color:#92400e}
+  .badge-red{background:#fee2e2;color:#991b1b}
+  table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden}
+  th{font-size:11px;text-align:left;padding:8px 10px;background:#f1f5f9;color:#475569;text-transform:uppercase;letter-spacing:.4px}
+  td{font-size:13px;padding:8px 10px;border-top:1px solid #f1f5f9}
+  footer{padding:12px 24px;font-size:11px;color:#64748b}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>INDIAN RAILWAYS — BLOCK PLANNING PORTAL</h1><span>AI-Powered Automatic Block Planning | Decision Support System</span></div>
+  <span id="user">Authorized Official • RAILWAY</span>
+</header>
+<nav>
+  <a href="#">Dashboard</a><a href="#">Maintenance</a><a href="#">Blocks</a><a href="#">Safety</a><a href="#">Optimization</a><a href="#">Execution</a><a href="#">Notifications</a>
+</nav>
+<div class="wrap">
+  <div class="breadcrumbs">Home / Dashboard / System Overview</div>
+  <div class="grid" id="kpis"></div>
+  <table id="recent"><thead><tr><th>Recent Activity</th><th>Entity</th><th>Status</th><th>Time</th></tr></thead><tbody></tbody></table>
+  <p style="font-size:12px;color:#64748b;margin-top:12px">Backend: <code>GET /api/dashboard/overview</code> • Principle: ML predicts → Safety validates → OR-Tools optimizes → Official decides → Execution explicit</p>
+</div>
+<footer>Government of India • Ministry of Railways • SIH26027 • For authorized use only</footer>
+<script>
+async function load(){
+  const token = localStorage.getItem('token');
+  const headers = token ? {Authorization:'Bearer '+token} : {};
+  try{
+    const r = await fetch('/api/dashboard/overview',{headers});
+    if(!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    document.getElementById('kpis').innerHTML = `
+      <div class="card"><h3>Maintenance Requests</h3><div class="val">${d.maintenance_requests.total}</div><span class="badge badge-amber">${d.maintenance_requests.pending_review} pending</span></div>
+      <div class="card"><h3>Optimized Blocks</h3><div class="val">${d.block_planning.optimized_blocks}</div><span class="badge badge-green">${d.block_planning.approved} approved</span></div>
+      <div class="card"><h3>Safety Validations</h3><div class="val">${d.safety.safe}/${d.safety.total_validations}</div><span class="badge badge-green">SAFE</span></div>
+      <div class="card"><h3>Active Executions</h3><div class="val">${d.block_planning.active}</div><span class="badge badge-amber">${d.resources.allocated} resources</span></div>`;
+    const tbody=document.querySelector('#recent tbody');
+    tbody.innerHTML = d.audit.recent.map(r=>`<tr><td>${r.action}</td><td>${r.entity_type}</td><td><span class="badge badge-green">${r.action}</span></td><td>${r.created_at||''}</td></tr>`).join('');
+  }catch(e){ document.getElementById('kpis').innerHTML='<div class="card">Login required — use /api/auth/login</div>'; }
+}
+load();
+</script>
+</body>
+</html>

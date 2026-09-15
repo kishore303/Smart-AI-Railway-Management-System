@@ -1,0 +1,6 @@
+# Alembic placeholder for future migrations (Module 1 uses authoritative_schema.sql directly)
+# To init later: alembic init alembic  + set sqlalchemy.url = postgresql+psycopg2://...
+
+[alembic]
+script_location = alembic
+sqlalchemy.url = driver://user:pass@localhost/dbname
