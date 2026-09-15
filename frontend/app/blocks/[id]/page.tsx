@@ -221,7 +221,16 @@ function DetailContent({ blockId }: { blockId: string }) {
                     <td>{c.predicted_delay_mins ?? "—"}</td>
                     <td>{c.asset_risk_score ?? "—"}</td>
                     <td><span className={`gov-badge gov-badge-${planningBadgeKind(c.safety_status)}`}>{c.safety_status}</span></td>
-                    <td><button type="button" className="gov-btn gov-btn-sm" onClick={() => void onSelectCandidate(c.id)}>View</button></td>
+                    <td>
+                      <button
+                        type="button"
+                        className="gov-btn gov-btn-primary gov-btn-sm"
+                        style={{ color: "#ffffff", backgroundColor: "var(--navy)", borderColor: "var(--navy-dark)" }}
+                        onClick={() => void onSelectCandidate(c.id)}
+                      >
+                        View
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
