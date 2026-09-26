@@ -53,10 +53,10 @@ Thumbs.db
 *.tmp
 *.temp
 
-# Jupyter / notebooks
+# Jupyter
 .ipynb_checkpoints/
 
-# Model artifacts / generated files (general protection)
+# Model artifacts / generated files
 *.h5
 *.pkl
 *.joblib
@@ -64,7 +64,7 @@ Thumbs.db
 model_artifacts/
 models/
 
-# Explicitly allow required runtime model artifacts and datasets for SIH26027
+# Allow required SIH26027 runtime models and datasets
 !backend/model_artifacts/
 !backend/model_artifacts/**
 !backend/model_artifacts/**/*.joblib
@@ -76,4 +76,3 @@ models/
 
 # Alembic local config
 alembic.ini
-
