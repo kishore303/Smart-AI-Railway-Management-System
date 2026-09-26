@@ -35,7 +35,7 @@ export default function IncidentsListPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
 
-  const [formType, setFormType] = useState("OTHER");
+  const [formType, setFormType] = useState("OTHER_EMERGENCY");
   const [formSeverity, setFormSeverity] = useState("HIGH");
   const [formDesc, setFormDesc] = useState("");
   const [formLat, setFormLat] = useState("");
@@ -45,9 +45,10 @@ export default function IncidentsListPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.get<{ total: number; items: IncidentSummary[] }>("/api/emergency/incidents?limit=50");
-      setIncidents(res.items || []);
-      setTotal(res.total || 0);
+      const res = await api.get<IncidentSummary[] | { total: number; items: IncidentSummary[] }>("/api/emergency/incidents?limit=50");
+      const items = Array.isArray(res) ? res : res.items;
+      setIncidents(items);
+      setTotal(Array.isArray(res) ? items.length : res.total);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load incidents");
     } finally {

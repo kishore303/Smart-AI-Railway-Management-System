@@ -15,7 +15,7 @@ class Simulation(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     simulation_name = Column(String(150), nullable=True)
     created_by = Column(BigInteger, ForeignKey("users.id"), nullable=False)
-    original_block_id = Column(BigInteger, ForeignKey("optimized_blocks.id"), nullable=False)
+    original_block_id = Column(BigInteger, ForeignKey("optimized_blocks.id"), nullable=True)
     modified_start_time = Column(DateTime(timezone=True), nullable=True)
     modified_end_time = Column(DateTime(timezone=True), nullable=True)
     additional_department_id = Column(BigInteger, ForeignKey("departments.id"), nullable=True)

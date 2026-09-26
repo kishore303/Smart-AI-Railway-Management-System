@@ -92,8 +92,9 @@ CREATE TYPE block_request_status AS ENUM (
 );
 
 CREATE TYPE optimized_block_status AS ENUM (
-    'PROPOSED', 'PENDING_APPROVAL', 'APPROVED', 'MODIFIED',
-    'REJECTED', 'ACTIVE', 'COMPLETED', 'CANCELLED'
+    'PROPOSED', 'PENDING_APPROVAL', 'APPROVED', 'SCHEDULED', 'MODIFIED',
+    'REJECTED', 'ACTIVE', 'MAINTENANCE', 'CLEARANCE_PENDING', 'RELEASED',
+    'COMPLETED', 'CANCELLED'
 );
 
 CREATE TYPE integration_response AS ENUM ('ACCEPT', 'REJECT', 'MODIFY');
@@ -791,7 +792,7 @@ CREATE TABLE simulations (
     id                          BIGSERIAL PRIMARY KEY,
     simulation_name             VARCHAR(150),
     created_by                  BIGINT NOT NULL REFERENCES users(id),
-    original_block_id           BIGINT NOT NULL REFERENCES optimized_blocks(id),
+    original_block_id           BIGINT REFERENCES optimized_blocks(id),
     modified_start_time         TIMESTAMPTZ,
     modified_end_time           TIMESTAMPTZ,
     additional_department_id    BIGINT REFERENCES departments(id),
