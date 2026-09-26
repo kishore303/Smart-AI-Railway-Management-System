@@ -23,7 +23,9 @@ from dotenv import load_dotenv
 load_dotenv(backend_dir / ".env")
 
 # Parse DATABASE_URL to extract parts
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@localhost:5432/sih26027")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL must be configured in the environment or backend/.env")
 
 # Extract for psycopg2 direct connections (without +psycopg2 prefix)
 # Format: postgresql+psycopg2://user:pass@host:port/dbname
@@ -32,10 +34,9 @@ import re
 m = re.match(r"postgresql\+psycopg2://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)", DATABASE_URL)
 if not m:
     m = re.match(r"postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)", DATABASE_URL)
-if m:
-    DB_USER, DB_PASS, DB_HOST, DB_PORT, DB_NAME = m.groups()
-else:
-    DB_USER, DB_PASS, DB_HOST, DB_PORT, DB_NAME = ("postgres", "postgres", "localhost", "5432", "sih26027")
+if not m:
+    raise ValueError("DATABASE_URL must be a PostgreSQL URL with user, host, port, and database")
+DB_USER, DB_PASS, DB_HOST, DB_PORT, DB_NAME = m.groups()
 
 SQL_FILE = backend_dir / "sql" / "authoritative_schema.sql"
 
@@ -79,28 +80,9 @@ def apply_schema(drop_first: bool = True):
     conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
     cur = conn.cursor()
     if drop_first:
-        print("Dropping existing schema objects (CASCADE)...")
-        # Drop view first, then tables, then types
-        cur.execute(
-            """
-            DROP VIEW IF EXISTS section_traffic_stats CASCADE;
-            DROP TABLE IF EXISTS
-                audit_logs, simulations, emergency_responses, incidents,
-                notifications, block_resource_allocations, block_affected_trains,
-                optimized_block_sources, block_candidates, optimized_blocks,
-                block_integration_requests, block_requests, ml_model_registry,
-                maintenance_predictions, maintenance_requests, train_schedules, trains,
-                resources, weather_readings, asset_failure_history, asset_sensor_readings,
-                assets, tracks, railway_sections, stations, users, department_roles, departments
-                CASCADE;
-            DROP TYPE IF EXISTS notification_type, emergency_response_status, incident_response_status,
-                incident_type, integration_final_status, integration_response,
-                optimized_block_status, block_request_status, maintenance_request_status,
-                notification_priority, severity_level, user_role CASCADE;
-            DROP FUNCTION IF EXISTS set_updated_at() CASCADE;
-            """
-        )
-        print("Dropped old objects")
+        print("Dropping existing schema (DROP SCHEMA public CASCADE)...")
+        cur.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public; CREATE EXTENSION IF NOT EXISTS postgis;")
+        print("Dropped old schema objects")
 
     sql = SQL_FILE.read_text(encoding="utf-8")
     print(f"Applying {SQL_FILE} ({len(sql)} bytes)...")

@@ -23,7 +23,8 @@ class User(Base):
     role = Column(
         PGEnum(
             "MAINTENANCE_STAFF",
-            "ENGINEER_REVIEWER",
+            "JUNIOR_ENGINEER",
+            "SENIOR_SECTION_ENGINEER",
             "OPERATOR",
             "CONTROLLER",
             "AUTHORIZED_OFFICIAL",

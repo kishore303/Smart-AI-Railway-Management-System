@@ -1,417 +1,907 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import AppShell from "@/components/AppShell";
 import Breadcrumbs from "@/components/Breadcrumbs";
+import { useAuth } from "@/lib/auth-context";
 import { api, ApiError } from "@/lib/api-client";
-
-// Exact value sets from backend/app/api/emergency.py (DB enums authoritative).
-const RESPONSE_STATUSES = ["OPEN", "IN_PROGRESS", "CLEARED"];
-const SEVERITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
-const AUTHORITY_TYPES = [
-  "RAILWAY_PROTECTION_FORCE",
-  "GOVERNMENT_RAILWAY_POLICE",
-  "LOCAL_POLICE",
-  "FIRE_BRIGADE",
-  "NDRF",
-  "MEDICAL",
-  "DISTRICT_ADMINISTRATION",
-  "OTHER",
-];
-const RESPONSE_LIFECYCLE = [
-  "ALERT_RECEIVED",
-  "TEAM_DISPATCHED",
-  "TEAM_ARRIVED",
-  "INCIDENT_HANDED_OVER",
-  "AREA_CLEARED",
-];
-
-interface EmergencyResponse {
-  id: number;
-  authority_type: string | null;
-  authority_name: string | null;
-  notification_time: string | null;
-  acknowledgement_time: string | null;
-  arrival_time: string | null;
-  clearance_time: string | null;
-  status: string;
-  notes: string | null;
-  created_at: string | null;
-}
-
-interface IncidentDetail {
-  id: number;
-  incident_code: string;
-  incident_type: string;
-  severity: string;
-  description: string | null;
-  section_id: number | null;
-  track_id: number | null;
-  latitude: number | null;
-  longitude: number | null;
-  reported_at: string | null;
-  reported_by: number | null;
-  railway_alert_status: string | null;
-  police_alert_status: string | null;
-  response_status: string;
-  clearance_time: string | null;
-  responses: EmergencyResponse[];
-}
-
-function fmt(dt: string | null): string {
-  if (!dt) return "—";
-  try {
-    return new Date(dt).toLocaleString();
-  } catch {
-    return dt;
-  }
-}
+import {
+  IncidentRecord,
+  AffectedTrainImpact,
+  ConflictingBlock,
+  EmergencyResource,
+  EmergencyCandidate,
+} from "@/types/emergency";
 
 export default function IncidentDetailPage() {
-  return (
-    <ProtectedRoute>
-      <AppShell>
-        <DetailContent />
-      </AppShell>
-    </ProtectedRoute>
-  );
-}
-
-function severityColor(s: string): string {
-  switch (s) {
-    case "CRITICAL": return "var(--red)";
-    case "HIGH": return "var(--amber)";
-    case "MEDIUM": return "var(--blue)";
-    default: return "var(--text-secondary)";
-  }
-}
-
-function statusColor(s: string): string {
-  if (s === "CLEARED" || s === "AREA_CLEARED") return "var(--green)";
-  if (s === "OPEN" || s === "IN_PROGRESS" || s === "ALERT_RECEIVED") return "var(--amber)";
-  return "var(--blue)";
-}
-
-function DetailContent() {
   const params = useParams<{ id: string }>();
-  const id = params.id;
-  const [data, setData] = useState<IncidentDetail | null>(null);
+  const incidentId = params.id;
+  const router = useRouter();
+  const { user } = useAuth();
+
+  const [incident, setIncident] = useState<IncidentRecord | null>(null);
+  const [affectedTrains, setAffectedTrains] = useState<AffectedTrainImpact | null>(null);
+  const [conflicts, setConflicts] = useState<ConflictingBlock[]>([]);
+  const [resources, setResources] = useState<EmergencyResource[]>([]);
+  const [candidates, setCandidates] = useState<EmergencyCandidate[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const dataRef = React.useRef<IncidentDetail | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"DETAILS" | "ASSESS" | "TRAINS" | "RESOURCES" | "PLANNING" | "TRACKING" | "CLEARANCE">("DETAILS");
 
-  const load = useCallback(async (silent = false) => {
-    // Silent reloads (after a successful mutation) must NOT flip the page
-    // back to the loading skeleton: that would unmount the cards and wipe
-    // their success feedback. Only show the skeleton on first load.
-    if (!silent || !dataRef.current) {
-      setLoading(true);
-    }
-    setError(null);
+  // Assessment Form
+  const [assessNotes, setAssessNotes] = useState("");
+  const [assessDuration, setAssessDuration] = useState(120);
+  const [assessSeverity, setAssessSeverity] = useState("HIGH");
+
+  // Clearance Form
+  const [chkTrack, setChkTrack] = useState(true);
+  const [chkOhe, setChkOhe] = useState(true);
+  const [chkSignals, setChkSignals] = useState(true);
+  const [clearanceNotes, setClearanceNotes] = useState("Track physically inspected, OHE energized, signals tested normal.");
+
+  // Action Loading states
+  const [actionLoading, setActionLoading] = useState(false);
+
+  const loadAll = async () => {
     try {
-      const res = await api.get<IncidentDetail>(`/api/emergency/incidents/${id}`);
-      dataRef.current = res;
-      setData(res);
-    } catch (err) {
-      // On silent reload failure keep showing the (freshly mutated) data
-      // instead of replacing the page with an error.
-      if (!dataRef.current) {
-        setError(err instanceof ApiError ? err.message : "Failed to load incident");
+      const inc = await api.get<IncidentRecord>(`/api/emergency/incidents/${incidentId}`);
+      setIncident(inc);
+      setAssessSeverity(inc.severity);
+      if (inc.assessment_notes) setAssessNotes(inc.assessment_notes);
+
+      // Load supporting data if assessed
+      if (inc.block_request_id || inc.status !== "REPORTED") {
+        try {
+          const [tr, conf, res] = await Promise.all([
+            api.get<AffectedTrainImpact>(`/api/emergency/incidents/${incidentId}/affected-trains`),
+            api.get<ConflictingBlock[]>(`/api/emergency/incidents/${incidentId}/conflicting-blocks`),
+            api.get<EmergencyResource[]>(`/api/emergency/incidents/${incidentId}/resources`),
+          ]);
+          setAffectedTrains(tr);
+          setConflicts(conf || []);
+          setResources(res || []);
+        } catch {
+          // Non-blocking
+        }
       }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to load incident details");
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  };
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    loadAll();
+  }, [incidentId]);
 
-  // Quiet refresh passed to mutation cards: preserves their feedback.
-  const refreshQuiet = useCallback(() => load(true), [load]);
+  // Handlers
+  const handleAcknowledge = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      await api.post(`/api/emergency/incidents/${incidentId}/acknowledge`, {});
+      setSuccess("Incident acknowledged successfully.");
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to acknowledge");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleAssess = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      await api.post(`/api/emergency/incidents/${incidentId}/assess`, {
+        assessment_notes: assessNotes,
+        estimated_duration_mins: Number(assessDuration),
+        severity: assessSeverity,
+      });
+      setSuccess("Incident assessed and emergency block request created.");
+      await loadAll();
+      setActiveTab("PLANNING");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to assess incident");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleGenerateCandidates = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      const res = await api.post<{ candidates: EmergencyCandidate[] }>(
+        `/api/emergency/incidents/${incidentId}/generate-candidates`,
+        {}
+      );
+      setCandidates(res.candidates || []);
+      setSuccess(`Generated and safety-evaluated ${res.candidates?.length || 0} candidate restoration windows.`);
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to generate candidates");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleOptimize = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      await api.post(`/api/emergency/incidents/${incidentId}/optimize`, {});
+      setSuccess("OR-Tools CP-SAT emergency optimization completed. Recommendation awaiting Railway Official decision.");
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Optimization failed");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDispatch = async () => {
+    setActionLoading(true);
+    try {
+      await api.post(`/api/emergency/incidents/${incidentId}/dispatch`, {
+        team_name: "Rapid Emergency Response Gang",
+        assigned_resources: "ART-01, TWR-03, P-Way Gang",
+      });
+      setSuccess("Emergency response team dispatched to incident site.");
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Dispatch failed");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleArrive = async () => {
+    setActionLoading(true);
+    try {
+      await api.post(`/api/emergency/incidents/${incidentId}/arrive`, {});
+      setSuccess("Response team arrival on site recorded.");
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to record arrival");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleStartWork = async () => {
+    setActionLoading(true);
+    try {
+      await api.post(`/api/emergency/incidents/${incidentId}/start-work`, {});
+      setSuccess("Physical restoration work commenced.");
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to start work");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleRequestClearance = async () => {
+    setActionLoading(true);
+    try {
+      await api.post(`/api/emergency/incidents/${incidentId}/request-clearance`, {});
+      setSuccess("Restoration work finished. Track clearance requested.");
+      await loadAll();
+      setActiveTab("CLEARANCE");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to request clearance");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleGrantClearance = async () => {
+    if (!chkTrack || !chkOhe || !chkSignals) {
+      setError("All 3 safety checklist items must be physically verified before granting track clearance.");
+      return;
+    }
+    setActionLoading(true);
+    try {
+      await api.post(`/api/emergency/incidents/${incidentId}/grant-clearance`, {
+        track_inspected: chkTrack,
+        ohe_tested: chkOhe,
+        signals_normal: chkSignals,
+        notes: clearanceNotes,
+      });
+      setSuccess("Track safety clearance certified.");
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to grant clearance");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleReleaseBlock = async () => {
+    setActionLoading(true);
+    try {
+      await api.post(`/api/emergency/incidents/${incidentId}/release-block`, {});
+      setSuccess("Emergency block released. Section throughput restored.");
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to release block");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleClose = async () => {
+    setActionLoading(true);
+    try {
+      await api.post(`/api/emergency/incidents/${incidentId}/close`, {
+        notes: "Restoration completed, block released, track traffic nominal.",
+      });
+      setSuccess("Incident formally closed.");
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to close incident");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const stepIndex = (st: string) => {
+    const map: Record<string, number> = {
+      REPORTED: 0,
+      ACKNOWLEDGED: 1,
+      ASSESSED: 2,
+      EMERGENCY_PLANNING: 3,
+      AWAITING_OFFICIAL_DECISION: 4,
+      APPROVED: 5,
+      RESPONSE_DISPATCHED: 6,
+      ON_SITE: 7,
+      WORK_IN_PROGRESS: 8,
+      CLEARANCE_PENDING: 9,
+      CLEARED: 10,
+      RELEASED: 11,
+      INCIDENT_CLOSED: 12,
+    };
+    return map[st] ?? 0;
+  };
 
   if (loading) {
     return (
-      <div className="gov-page">
-        <Breadcrumbs trail={[{ label: "Dashboard", href: "/dashboard" }, { label: "Emergency", href: "/emergency" }, { label: "Incidents", href: "/emergency/incidents" }, { label: `Incident ${id}` }]} />
-        <div className="gov-card"><div className="gov-loading">Loading incident…</div></div>
-      </div>
+      <ProtectedRoute>
+        <AppShell>
+          <div className="gov-page"><p>Loading incident data...</p></div>
+        </AppShell>
+      </ProtectedRoute>
     );
   }
 
-  if (error || !data) {
+  if (!incident) {
     return (
-      <div className="gov-page">
-        <Breadcrumbs trail={[{ label: "Dashboard", href: "/dashboard" }, { label: "Emergency", href: "/emergency" }, { label: "Incidents", href: "/emergency/incidents" }, { label: `Incident ${id}` }]} />
-        <div className="gov-card">
-          <div className="gov-alert gov-alert-error" role="alert">{error ?? "Incident not found."}</div>
-          <p style={{ marginTop: 12 }}><Link className="gov-link" href="/emergency/incidents">Back to Incidents</Link></p>
-        </div>
-      </div>
+      <ProtectedRoute>
+        <AppShell>
+          <div className="gov-page"><div className="gov-alert gov-alert-error">Incident not found</div></div>
+        </AppShell>
+      </ProtectedRoute>
     );
   }
 
-  return (
-    <div className="gov-page">
-      <Breadcrumbs trail={[{ label: "Dashboard", href: "/dashboard" }, { label: "Emergency", href: "/emergency" }, { label: "Incidents", href: "/emergency/incidents" }, { label: data.incident_code }]} />
-      <div className="gov-page-header">
-        <div>
-          <h1 className="gov-title">
-            {data.incident_code}{" "}
-            <span className="gov-badge" style={{ background: statusColor(data.response_status), color: "#fff" }}>{data.response_status}</span>{" "}
-            <span className="gov-badge" style={{ background: severityColor(data.severity), color: "#fff" }}>{data.severity}</span>
-          </h1>
-          <p className="gov-sub">{data.incident_type.replace(/_/g, " ")} — incident details and response coordination.</p>
-        </div>
-        <Link className="gov-btn gov-btn-secondary" href="/emergency/incidents">Back to List</Link>
-      </div>
-
-      <div className="gov-card">
-        <div className="gov-section-header">
-          <h2 className="gov-section-title">Incident Details</h2>
-        </div>
-        <div className="gov-kv-grid">
-          <div className="gov-kv-label">Incident ID</div>
-          <div className="gov-kv-value">{data.id}</div>
-          <div className="gov-kv-label">Type</div>
-          <div className="gov-kv-value">{data.incident_type.replace(/_/g, " ")}</div>
-          <div className="gov-kv-label">Severity</div>
-          <div className="gov-kv-value">{data.severity}</div>
-          <div className="gov-kv-label">Status</div>
-          <div className="gov-kv-value">{data.response_status}</div>
-          <div className="gov-kv-label">Section ID</div>
-          <div className="gov-kv-value">{data.section_id ?? "—"}</div>
-          <div className="gov-kv-label">Track ID</div>
-          <div className="gov-kv-value">{data.track_id ?? "—"}</div>
-          <div className="gov-kv-label">Latitude</div>
-          <div className="gov-kv-value">{data.latitude ?? "—"}</div>
-          <div className="gov-kv-label">Longitude</div>
-          <div className="gov-kv-value">{data.longitude ?? "—"}</div>
-          <div className="gov-kv-label">Description</div>
-          <div className="gov-kv-value">{data.description || "—"}</div>
-          <div className="gov-kv-label">Reported At</div>
-          <div className="gov-kv-value">{fmt(data.reported_at)}</div>
-          <div className="gov-kv-label">Reported By (user ID)</div>
-          <div className="gov-kv-value">{data.reported_by ?? "—"}</div>
-          <div className="gov-kv-label">Railway Alert</div>
-          <div className="gov-kv-value">{data.railway_alert_status ?? "—"}</div>
-          <div className="gov-kv-label">Police Alert</div>
-          <div className="gov-kv-value">{data.police_alert_status ?? "—"}</div>
-          <div className="gov-kv-label">Clearance Time</div>
-          <div className="gov-kv-value">{fmt(data.clearance_time)}</div>
-        </div>
-      </div>
-
-      <StatusUpdateCard incident={data} onUpdated={refreshQuiet} />
-      <ResponseSection incidentId={data.id} responses={data.responses} onChanged={refreshQuiet} />
-    </div>
-  );
-}
-
-function StatusUpdateCard({ incident, onUpdated }: { incident: IncidentDetail; onUpdated: () => Promise<void> }) {
-  const [status, setStatus] = useState(incident.response_status);
-  const [severity, setSeverity] = useState(incident.severity);
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    setStatus(incident.response_status);
-    setSeverity(incident.severity);
-  }, [incident.response_status, incident.severity]);
-
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (busy) return;
-    setBusy(true);
-    setMsg(null);
-    setErr(null);
-    try {
-      const res = await api.patch<{ response_status: string }>(`/api/emergency/incidents/${incident.id}`, {
-        response_status: status,
-        severity,
-      });
-      setMsg(`Incident updated — status is now ${res.response_status}.`);
-      await onUpdated();
-    } catch (e2) {
-      setErr(e2 instanceof ApiError ? e2.message : "Failed to update incident");
-    } finally {
-      setBusy(false);
-    }
-  }
+  const currentStep = stepIndex(incident.status);
 
   return (
-    <div className="gov-card">
-      <div className="gov-section-header">
-        <h2 className="gov-section-title">Update Status</h2>
-      </div>
-      <div className="gov-info-box">Current status: <strong>{incident.response_status}</strong>. Only backend-supported statuses are offered.</div>
-      <form onSubmit={onSubmit}>
-        <div className="gov-form-grid">
-          <div>
-            <label className="gov-label" htmlFor="inc-status">Response Status *</label>
-            <select id="inc-status" className="gov-select" value={status} onChange={(e) => setStatus(e.target.value)} required>
-              {RESPONSE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
+    <ProtectedRoute>
+      <AppShell>
+        <div className="gov-page">
+          <Breadcrumbs
+            trail={[
+              { label: "Dashboard", href: "/dashboard" },
+              { label: "Emergency Control", href: "/emergency" },
+              { label: incident.incident_code },
+            ]}
+          />
+
+          {/* Header Banner */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+            <div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+                <span className="gov-badge gov-badge-danger" style={{ fontWeight: 700 }}>
+                  {incident.severity}
+                </span>
+                <span className="gov-badge gov-badge-info">
+                  {incident.incident_type.replace(/_/g, " ")}
+                </span>
+                {incident.is_simulated && (
+                  <span className="gov-badge" style={{ background: "#6b7280", color: "#fff" }}>
+                    SIMULATED
+                  </span>
+                )}
+              </div>
+              <h1 className="gov-title" style={{ margin: 0 }}>
+                {incident.incident_code} — {incident.section_name || `Section #${incident.section_id}`}
+              </h1>
+              <p className="gov-sub" style={{ marginTop: 4 }}>
+                Reported at {new Date(incident.reported_at).toLocaleString()} | Reporter: {incident.reporter_name || "Emergency Desk"}
+              </p>
+            </div>
+
+            <div style={{ display: "flex", gap: 8 }}>
+              {incident.status === "AWAITING_OFFICIAL_DECISION" && (
+                <Link
+                  href={`/emergency/approval/${incident.id}`}
+                  className="gov-btn gov-btn-primary"
+                  style={{ background: "#f59e0b", borderColor: "#f59e0b", color: "#000", fontWeight: 700 }}
+                >
+                  ⚡ Official Decision Gateway
+                </Link>
+              )}
+            </div>
           </div>
-          <div>
-            <label className="gov-label" htmlFor="inc-sev">Severity *</label>
-            <select id="inc-sev" className="gov-select" value={severity} onChange={(e) => setSeverity(e.target.value)} required>
-              {SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
+
+          {error && <div className="gov-alert gov-alert-error" role="alert">{error}</div>}
+          {success && <div className="gov-alert gov-alert-success" role="status">{success}</div>}
+
+          {/* Step Progress Tracker */}
+          <div className="gov-card" style={{ marginBottom: 20, padding: 14 }}>
+            <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--text-secondary)", marginBottom: 8 }}>
+              EMERGENCY LIFECYCLE PROGRESS
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              {[
+                "1. Reported",
+                "2. Acknowledged",
+                "3. Assessed",
+                "4. Re-Planning",
+                "5. Official Decision",
+                "6. Approved",
+                "7. Dispatched",
+                "8. On-Site Work",
+                "9. Clearance",
+                "10. Released & Closed",
+              ].map((lbl, idx) => {
+                const isPassed = currentStep >= idx;
+                const isCurrent = currentStep === idx || (idx === 4 && incident.status === "AWAITING_OFFICIAL_DECISION");
+                return (
+                  <div
+                    key={lbl}
+                    style={{
+                      padding: "4px 8px",
+                      borderRadius: 4,
+                      fontSize: "0.75rem",
+                      fontWeight: isCurrent ? 700 : 500,
+                      background: isCurrent ? "#2563eb" : isPassed ? "#10b981" : "rgba(0,0,0,0.06)",
+                      color: isCurrent || isPassed ? "#ffffff" : "var(--text-secondary)",
+                    }}
+                  >
+                    {lbl}
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
-        <div className="gov-form-actions">
-          <button className="gov-btn" type="submit" disabled={busy}>{busy ? "Updating…" : "Update Incident"}</button>
-        </div>
-      </form>
-      {err ? <div className="gov-alert gov-alert-error" role="alert" style={{ marginTop: 12 }}>{err}</div> : null}
-      {msg ? <div className="gov-alert gov-alert-success" role="status" style={{ marginTop: 12 }}>{msg}</div> : null}
-    </div>
-  );
-}
 
-function ResponseSection({ incidentId, responses, onChanged }: { incidentId: number; responses: EmergencyResponse[]; onChanged: () => Promise<void> }) {
-  const [authority, setAuthority] = useState(AUTHORITY_TYPES[0]);
-  const [authorityName, setAuthorityName] = useState("");
-  const [notes, setNotes] = useState("");
-  const [creating, setCreating] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
-  const [formSuccess, setFormSuccess] = useState<string | null>(null);
-  const [updatingId, setUpdatingId] = useState<number | null>(null);
-
-  async function onCreate(e: React.FormEvent) {
-    e.preventDefault();
-    if (creating) return;
-    setCreating(true);
-    setFormError(null);
-    setFormSuccess(null);
-    try {
-      const body: Record<string, unknown> = { authority_type: authority };
-      if (authorityName.trim() !== "") body.authority_name = authorityName.trim().slice(0, 150);
-      if (notes.trim() !== "") body.notes = notes.trim();
-      const res = await api.post<{ id: number }>(`/api/emergency/incidents/${incidentId}/responses`, body);
-      setFormSuccess(`Response #${res.id} recorded.`);
-      setAuthorityName("");
-      setNotes("");
-      await onChanged();
-    } catch (err) {
-      setFormError(err instanceof ApiError ? err.message : "Failed to record response");
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  return (
-    <div className="gov-card">
-      <div className="gov-section-header">
-        <h2 className="gov-section-title">Emergency Responses ({responses.length})</h2>
-      </div>
-      {responses.length === 0 ? (
-        <div className="gov-empty">
-          <p>No responses recorded yet. Dispatch an authority below.</p>
-        </div>
-      ) : (
-        <div className="gov-table-wrap">
-          <table className="gov-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Authority</th>
-                <th>Name</th>
-                <th>Status</th>
-                <th>Notified</th>
-                <th>Acknowledged</th>
-                <th>Arrived</th>
-                <th>Notes</th>
-                <th>Update</th>
-              </tr>
-            </thead>
-            <tbody>
-              {responses.map((r) => (
-                <ResponseRow key={r.id} response={r} busy={updatingId === r.id} setBusy={(b) => setUpdatingId(b ? r.id : null)} onChanged={onChanged} />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <div className="gov-section-header" style={{ marginTop: 16 }}>
-        <h3 className="gov-section-title">Dispatch Response Authority</h3>
-      </div>
-      {formError ? <div className="gov-alert gov-alert-error" role="alert">{formError}</div> : null}
-      {formSuccess ? <div className="gov-alert gov-alert-success" role="status">{formSuccess}</div> : null}
-      <form onSubmit={onCreate}>
-        <div className="gov-form-grid">
-          <div>
-            <label className="gov-label" htmlFor="resp-authority">Authority Type *</label>
-            <select id="resp-authority" className="gov-select" value={authority} onChange={(e) => setAuthority(e.target.value)} required>
-              {AUTHORITY_TYPES.map((a) => <option key={a} value={a}>{a.replace(/_/g, " ")}</option>)}
-            </select>
+          {/* Tab Navigation */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 16, borderBottom: "1px solid var(--border-color)", paddingBottom: 8, overflowX: "auto" }}>
+            <button
+              type="button"
+              className={`gov-btn ${activeTab === "DETAILS" ? "gov-btn-primary" : "gov-btn-secondary"}`}
+              style={{ fontSize: "0.85rem", padding: "6px 12px" }}
+              onClick={() => setActiveTab("DETAILS")}
+            >
+              📋 Incident Details
+            </button>
+            <button
+              type="button"
+              className={`gov-btn ${activeTab === "ASSESS" ? "gov-btn-primary" : "gov-btn-secondary"}`}
+              style={{ fontSize: "0.85rem", padding: "6px 12px" }}
+              onClick={() => setActiveTab("ASSESS")}
+            >
+              📝 Assessment & MR
+            </button>
+            <button
+              type="button"
+              className={`gov-btn ${activeTab === "TRAINS" ? "gov-btn-primary" : "gov-btn-secondary"}`}
+              style={{ fontSize: "0.85rem", padding: "6px 12px" }}
+              onClick={() => setActiveTab("TRAINS")}
+            >
+              🚆 Train Delays ({affectedTrains?.affected_train_count || 0})
+            </button>
+            <button
+              type="button"
+              className={`gov-btn ${activeTab === "RESOURCES" ? "gov-btn-primary" : "gov-btn-secondary"}`}
+              style={{ fontSize: "0.85rem", padding: "6px 12px" }}
+              onClick={() => setActiveTab("RESOURCES")}
+            >
+              🛠 Available Relief Assets ({resources.length})
+            </button>
+            <button
+              type="button"
+              className={`gov-btn ${activeTab === "PLANNING" ? "gov-btn-primary" : "gov-btn-secondary"}`}
+              style={{ fontSize: "0.85rem", padding: "6px 12px" }}
+              onClick={() => setActiveTab("PLANNING")}
+            >
+              🤖 CP-SAT Optimization
+            </button>
+            <button
+              type="button"
+              className={`gov-btn ${activeTab === "TRACKING" ? "gov-btn-primary" : "gov-btn-secondary"}`}
+              style={{ fontSize: "0.85rem", padding: "6px 12px" }}
+              onClick={() => setActiveTab("TRACKING")}
+            >
+              ⏱ Response Gang Tracking
+            </button>
+            <button
+              type="button"
+              className={`gov-btn ${activeTab === "CLEARANCE" ? "gov-btn-primary" : "gov-btn-secondary"}`}
+              style={{ fontSize: "0.85rem", padding: "6px 12px" }}
+              onClick={() => setActiveTab("CLEARANCE")}
+            >
+              ✅ Track Clearance Certification
+            </button>
           </div>
-          <div>
-            <label className="gov-label" htmlFor="resp-name">Authority Name (optional)</label>
-            <input id="resp-name" className="gov-input" value={authorityName} onChange={(e) => setAuthorityName(e.target.value)} maxLength={150} placeholder="Unit / station name" />
-          </div>
+
+          {/* TAB CONTENT */}
+
+          {/* 1. Details Tab */}
+          {activeTab === "DETAILS" && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+              <div className="gov-card">
+                <h3 style={{ fontSize: "1rem", fontWeight: 700, marginBottom: 12 }}>Incident Metadata</h3>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: "0.88rem" }}>
+                  <div>
+                    <span style={{ color: "var(--text-secondary)", display: "block", fontSize: "0.75rem" }}>SECTION</span>
+                    <strong>{incident.section_name || `Section #${incident.section_id}`}</strong>
+                  </div>
+                  <div>
+                    <span style={{ color: "var(--text-secondary)", display: "block", fontSize: "0.75rem" }}>TRACK</span>
+                    <strong>{incident.track_number ? `Track #${incident.track_number}` : "All Tracks / Unspecified"}</strong>
+                  </div>
+                  <div>
+                    <span style={{ color: "var(--text-secondary)", display: "block", fontSize: "0.75rem" }}>COORDINATES</span>
+                    <span>{incident.latitude ? `${incident.latitude}, ${incident.longitude}` : "GPS N/A"}</span>
+                  </div>
+                  <div>
+                    <span style={{ color: "var(--text-secondary)", display: "block", fontSize: "0.75rem" }}>LINKED BLOCK CODE</span>
+                    <span>{incident.block_code || "Pending Assessment"}</span>
+                  </div>
+                  <div>
+                    <span style={{ color: "var(--text-secondary)", display: "block", fontSize: "0.75rem" }}>RAILWAY ALERT</span>
+                    <span className="gov-badge gov-badge-success">{incident.railway_alert_status || "SENT"}</span>
+                  </div>
+                  <div>
+                    <span style={{ color: "var(--text-secondary)", display: "block", fontSize: "0.75rem" }}>POLICE ALERT</span>
+                    <span className="gov-badge">{incident.police_alert_status || "NOT_APPLICABLE"}</span>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 14 }}>
+                  <span style={{ color: "var(--text-secondary)", display: "block", fontSize: "0.75rem" }}>DESCRIPTION</span>
+                  <p style={{ marginTop: 4, fontSize: "0.88rem" }}>{incident.description || "No description provided."}</p>
+                </div>
+
+                {incident.status === "REPORTED" && (
+                  <div style={{ marginTop: 16 }}>
+                    <button
+                      type="button"
+                      className="gov-btn gov-btn-primary"
+                      onClick={handleAcknowledge}
+                      disabled={actionLoading}
+                      style={{ background: "#2563eb", width: "100%" }}
+                    >
+                      {actionLoading ? "Acknowledging..." : "✓ Acknowledge Incident"}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="gov-card">
+                <h3 style={{ fontSize: "1rem", fontWeight: 700, marginBottom: 12 }}>Response History ({incident.responses.length})</h3>
+                {incident.responses.length === 0 ? (
+                  <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem" }}>No response units logged yet.</p>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {incident.responses.map((r) => (
+                      <div key={r.id} style={{ padding: 10, background: "rgba(0,0,0,0.03)", borderRadius: 6, fontSize: "0.85rem" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between" }}>
+                          <strong>{r.team_name || r.authority_name || r.authority_type}</strong>
+                          <span className="gov-badge">{r.status}</span>
+                        </div>
+                        <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)", marginTop: 4 }}>
+                          {r.assigned_resources && <div>Resources: {r.assigned_resources}</div>}
+                          {r.arrival_time && <div>Arrived: {new Date(r.arrival_time).toLocaleTimeString()}</div>}
+                          {r.clearance_time && <div>Cleared: {new Date(r.clearance_time).toLocaleTimeString()}</div>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* 2. Assessment Tab */}
+          {activeTab === "ASSESS" && (
+            <div className="gov-card" style={{ maxWidth: 700 }}>
+              <h3 style={{ fontSize: "1.1rem", fontWeight: 700, marginBottom: 12 }}>
+                Technical Assessment & Emergency Request Setup
+              </h3>
+              <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: 16 }}>
+                Recording assessment generates a linked Critical Maintenance Request and Emergency Block Request.
+              </p>
+
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 600, marginBottom: 4 }}>
+                  Severity Classification
+                </label>
+                <select
+                  className="gov-input"
+                  value={assessSeverity}
+                  onChange={(e) => setAssessSeverity(e.target.value)}
+                  style={{ width: "100%", fontSize: "0.88rem" }}
+                >
+                  <option value="CRITICAL">CRITICAL (Total Section Blockage)</option>
+                  <option value="HIGH">HIGH (Single Track Blockage)</option>
+                  <option value="MEDIUM">MEDIUM (Speed Restriction Required)</option>
+                  <option value="LOW">LOW (Precautionary)</option>
+                </select>
+              </div>
+
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 600, marginBottom: 4 }}>
+                  Estimated Restoration Duration (Minutes)
+                </label>
+                <input
+                  type="number"
+                  className="gov-input"
+                  value={assessDuration}
+                  onChange={(e) => setAssessDuration(Number(e.target.value))}
+                  style={{ width: "100%", fontSize: "0.88rem" }}
+                />
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 600, marginBottom: 4 }}>
+                  Technical Assessment Notes & Scope of Work
+                </label>
+                <textarea
+                  className="gov-textarea"
+                  rows={4}
+                  placeholder="Describe damage, required cranes, OHE isolation, signal interlocking status..."
+                  value={assessNotes}
+                  onChange={(e) => setAssessNotes(e.target.value)}
+                  style={{ width: "100%", fontSize: "0.88rem" }}
+                />
+              </div>
+
+              <button
+                type="button"
+                className="gov-btn gov-btn-primary"
+                onClick={handleAssess}
+                disabled={actionLoading}
+                style={{ width: "100%", background: "#dc2626", borderColor: "#dc2626", fontWeight: 700 }}
+              >
+                {actionLoading ? "Submitting Assessment..." : "Submit Technical Assessment & Initialize Emergency Block"}
+              </button>
+            </div>
+          )}
+
+          {/* 3. Affected Trains Tab */}
+          {activeTab === "TRAINS" && (
+            <div className="gov-card">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                <h3 style={{ fontSize: "1.1rem", fontWeight: 700, margin: 0 }}>
+                  Timetable Impact & ML Delay Prediction
+                </h3>
+                {affectedTrains && (
+                  <span className="gov-badge gov-badge-danger" style={{ fontWeight: 700 }}>
+                    Total Delay: {affectedTrains.total_predicted_delay_minutes} mins ({affectedTrains.affected_train_count} trains)
+                  </span>
+                )}
+              </div>
+
+              {!affectedTrains || affectedTrains.individual_predictions.length === 0 ? (
+                <p style={{ color: "var(--text-secondary)" }}>No timetable trains affected during the initial window.</p>
+              ) : (
+                <div className="gov-table-container">
+                  <table className="gov-table">
+                    <thead>
+                      <tr>
+                        <th>Train #</th>
+                        <th>Train Name</th>
+                        <th>Station</th>
+                        <th>ML Predicted Delay</th>
+                        <th>Impact Level</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {affectedTrains.individual_predictions.map((tr) => (
+                        <tr key={tr.train_number}>
+                          <td style={{ fontWeight: 700 }}>{tr.train_number}</td>
+                          <td>{tr.train_name}</td>
+                          <td>{tr.station_name} ({tr.station_code})</td>
+                          <td style={{ fontWeight: 700, color: tr.predicted_delay_mins > 30 ? "#dc2626" : "#f59e0b" }}>
+                            +{tr.predicted_delay_mins} mins
+                          </td>
+                          <td>
+                            <span className={`gov-badge ${tr.impact_level === "CRITICAL" ? "gov-badge-danger" : "gov-badge-warning"}`}>
+                              {tr.impact_level}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 4. Resources Tab */}
+          {activeTab === "RESOURCES" && (
+            <div className="gov-card">
+              <h3 style={{ fontSize: "1.1rem", fontWeight: 700, marginBottom: 12 }}>
+                Nearby Emergency Relief Assets & Depots
+              </h3>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
+                {resources.map((r) => (
+                  <div key={r.resource_id} style={{ padding: 14, background: "rgba(0,0,0,0.03)", borderRadius: 8, border: "1px solid var(--border-color)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                      <strong style={{ fontSize: "0.95rem" }}>{r.name}</strong>
+                      <span className="gov-badge gov-badge-success">{r.status}</span>
+                    </div>
+                    <div style={{ fontSize: "0.82rem", color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 3 }}>
+                      <div>Depot: <strong>{r.depot_location}</strong></div>
+                      <div>ETA to Site: <strong style={{ color: "#2563eb" }}>{r.eta_minutes} mins</strong></div>
+                      <div>Contact Desk: <code>{r.contact}</code></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 5. Planning & CP-SAT Optimization Tab */}
+          {activeTab === "PLANNING" && (
+            <div>
+              <div className="gov-card" style={{ marginBottom: 20 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <div>
+                    <h3 style={{ fontSize: "1.1rem", fontWeight: 700, margin: 0 }}>
+                      Emergency Candidate Windows & Safety Gate
+                    </h3>
+                    <p style={{ fontSize: "0.82rem", color: "var(--text-secondary)", marginTop: 2 }}>
+                      Deterministic Safety Engine evaluates candidates before OR-Tools CP-SAT re-optimization.
+                    </p>
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      type="button"
+                      className="gov-btn gov-btn-secondary"
+                      onClick={handleGenerateCandidates}
+                      disabled={actionLoading}
+                    >
+                      {actionLoading ? "Generating..." : "⚡ Generate Candidates"}
+                    </button>
+                    <button
+                      type="button"
+                      className="gov-btn gov-btn-primary"
+                      onClick={handleOptimize}
+                      disabled={actionLoading}
+                      style={{ background: "#2563eb" }}
+                    >
+                      {actionLoading ? "Solving CP-SAT..." : "🚀 Run OR-Tools Optimization"}
+                    </button>
+                  </div>
+                </div>
+
+                {candidates.length === 0 ? (
+                  <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem" }}>
+                    Click &quot;Generate Candidates&quot; to synthesize immediate, post-express, and buffered restoration windows.
+                  </p>
+                ) : (
+                  <div className="gov-table-container">
+                    <table className="gov-table">
+                      <thead>
+                        <tr>
+                          <th>Candidate Label</th>
+                          <th>Window (Start – End)</th>
+                          <th>Duration</th>
+                          <th>Predicted Delay</th>
+                          <th>Hard Safety Gate</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {candidates.map((c) => (
+                          <tr key={c.candidate_id}>
+                            <td style={{ fontWeight: 600 }}>{c.label}</td>
+                            <td>
+                              {new Date(c.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} – {new Date(c.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </td>
+                            <td>{c.duration_mins} mins</td>
+                            <td style={{ color: "#dc2626", fontWeight: 600 }}>{c.predicted_delay_mins} mins</td>
+                            <td>
+                              <span className={`gov-badge ${c.safety_status === "SAFE" ? "gov-badge-success" : "gov-badge-danger"}`}>
+                                {c.safety_status}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {incident.status === "AWAITING_OFFICIAL_DECISION" && (
+                <div className="gov-card" style={{ background: "rgba(245, 158, 11, 0.08)", borderLeft: "4px solid #f59e0b" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div>
+                      <h4 style={{ fontWeight: 700, margin: 0, color: "#92400e" }}>
+                        OR-Tools Recommendation Ready for Official Decision
+                      </h4>
+                      <p style={{ margin: "4px 0 0 0", fontSize: "0.85rem" }}>
+                        Human-in-the-loop: A Railway Authorized Official must review and approve before response execution.
+                      </p>
+                    </div>
+                    <Link
+                      href={`/emergency/approval/${incident.id}`}
+                      className="gov-btn gov-btn-primary"
+                      style={{ background: "#f59e0b", borderColor: "#f59e0b", color: "#000", fontWeight: 700 }}
+                    >
+                      Open Official Approval Center →
+                    </Link>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 6. Response Gang Tracking Tab */}
+          {activeTab === "TRACKING" && (
+            <div className="gov-card">
+              <h3 style={{ fontSize: "1.1rem", fontWeight: 700, marginBottom: 14 }}>
+                Physical Response & Work Tracking
+              </h3>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
+                <button
+                  type="button"
+                  className="gov-btn"
+                  onClick={handleDispatch}
+                  disabled={actionLoading || currentStep >= 6}
+                  style={{ background: currentStep >= 6 ? "#10b981" : "#2563eb", color: "#fff" }}
+                >
+                  1. Dispatch Gang {currentStep >= 6 && "✓"}
+                </button>
+                <button
+                  type="button"
+                  className="gov-btn"
+                  onClick={handleArrive}
+                  disabled={actionLoading || currentStep < 6 || currentStep >= 7}
+                  style={{ background: currentStep >= 7 ? "#10b981" : "#2563eb", color: "#fff" }}
+                >
+                  2. Mark On-Site {currentStep >= 7 && "✓"}
+                </button>
+                <button
+                  type="button"
+                  className="gov-btn"
+                  onClick={handleStartWork}
+                  disabled={actionLoading || currentStep < 7 || currentStep >= 8}
+                  style={{ background: currentStep >= 8 ? "#10b981" : "#2563eb", color: "#fff" }}
+                >
+                  3. Start Work {currentStep >= 8 && "✓"}
+                </button>
+                <button
+                  type="button"
+                  className="gov-btn"
+                  onClick={handleRequestClearance}
+                  disabled={actionLoading || currentStep < 8 || currentStep >= 9}
+                  style={{ background: currentStep >= 9 ? "#10b981" : "#f59e0b", color: currentStep >= 9 ? "#fff" : "#000", fontWeight: 700 }}
+                >
+                  4. Finish Work & Request Clearance {currentStep >= 9 && "✓"}
+                </button>
+              </div>
+
+              <div style={{ fontSize: "0.85rem", color: "var(--text-secondary)" }}>
+                Current Operational State: <strong>{incident.status.replace(/_/g, " ")}</strong>
+              </div>
+            </div>
+          )}
+
+          {/* 7. Clearance Tab */}
+          {activeTab === "CLEARANCE" && (
+            <div className="gov-card" style={{ maxWidth: 700 }}>
+              <h3 style={{ fontSize: "1.1rem", fontWeight: 700, marginBottom: 12 }}>
+                Mandatory Track Clearance Verification Checklist
+              </h3>
+              <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: 16 }}>
+                Before emergency block release and section throughput restoration, verify all physical safety conditions.
+              </p>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.88rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={chkTrack}
+                    onChange={(e) => setChkTrack(e.target.checked)}
+                  />
+                  <span><strong>Track Structure & Gauge Verification:</strong> Rails inspected, fastenings secure, no debris.</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.88rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={chkOhe}
+                    onChange={(e) => setChkOhe(e.target.checked)}
+                  />
+                  <span><strong>OHE & Power Energization:</strong> Traction wires checked, clearances verified, 25kV power restored.</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.88rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={chkSignals}
+                    onChange={(e) => setChkSignals(e.target.checked)}
+                  />
+                  <span><strong>Signaling & Interlocking:</strong> Track circuits clear, point machines tested, signal aspects green.</span>
+                </label>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 600, marginBottom: 4 }}>
+                  Clearance Certification Notes
+                </label>
+                <textarea
+                  className="gov-textarea"
+                  rows={3}
+                  value={clearanceNotes}
+                  onChange={(e) => setClearanceNotes(e.target.value)}
+                  style={{ width: "100%", fontSize: "0.88rem" }}
+                />
+              </div>
+
+              <div style={{ display: "flex", gap: 10 }}>
+                {incident.status !== "CLEARED" && incident.status !== "RELEASED" && incident.status !== "INCIDENT_CLOSED" && (
+                  <button
+                    type="button"
+                    className="gov-btn gov-btn-primary"
+                    onClick={handleGrantClearance}
+                    disabled={actionLoading}
+                    style={{ background: "#059669", borderColor: "#059669", fontWeight: 700 }}
+                  >
+                    {actionLoading ? "Certifying..." : "✓ Grant Track Safety Clearance"}
+                  </button>
+                )}
+
+                {incident.status === "CLEARED" && (
+                  <button
+                    type="button"
+                    className="gov-btn gov-btn-primary"
+                    onClick={handleReleaseBlock}
+                    disabled={actionLoading}
+                    style={{ background: "#2563eb", fontWeight: 700 }}
+                  >
+                    {actionLoading ? "Releasing Block..." : "🚀 Release Emergency Block & Restore Section"}
+                  </button>
+                )}
+
+                {incident.status === "RELEASED" && (
+                  <button
+                    type="button"
+                    className="gov-btn gov-btn-secondary"
+                    onClick={handleClose}
+                    disabled={actionLoading}
+                    style={{ fontWeight: 700 }}
+                  >
+                    {actionLoading ? "Closing..." : "🔒 Formally Close Incident"}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
         </div>
-        <label className="gov-label" htmlFor="resp-notes">Notes (optional)</label>
-        <textarea id="resp-notes" className="gov-textarea" value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="Dispatch notes…" />
-        <div className="gov-form-actions">
-          <button className="gov-btn" type="submit" disabled={creating}>{creating ? "Recording…" : "Record Response"}</button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function ResponseRow({ response, busy, setBusy, onChanged }: { response: EmergencyResponse; busy: boolean; setBusy: (b: boolean) => void; onChanged: () => Promise<void> }) {
-  const [status, setStatus] = useState(response.status);
-  const [notes, setNotes] = useState(response.notes ?? "");
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    setStatus(response.status);
-    setNotes(response.notes ?? "");
-  }, [response.status, response.notes]);
-
-  async function onSave() {
-    if (busy) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await api.patch(`/api/emergency/responses/${response.id}`, { status, notes: notes.trim() === "" ? null : notes.trim() });
-      await onChanged();
-    } catch (e2) {
-      setErr(e2 instanceof ApiError ? e2.message : "Failed to update response");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <tr>
-      <td>{response.id}</td>
-      <td>{(response.authority_type ?? "—").replace(/_/g, " ")}</td>
-      <td>{response.authority_name ?? "—"}</td>
-      <td><span className="gov-badge" style={{ background: statusColor(response.status), color: "#fff" }}>{response.status}</span></td>
-      <td>{fmt(response.notification_time)}</td>
-      <td>{fmt(response.acknowledgement_time)}</td>
-      <td>{fmt(response.arrival_time)}</td>
-      <td style={{ minWidth: 160 }}>
-        <textarea className="gov-textarea" value={notes} onChange={(e) => setNotes(e.target.value)} rows={1} style={{ fontSize: 12 }} />
-        {err ? <div className="gov-alert gov-alert-error" role="alert" style={{ marginTop: 6, fontSize: 12 }}>{err}</div> : null}
-      </td>
-      <td style={{ minWidth: 170 }}>
-        <select className="gov-select" value={RESPONSE_LIFECYCLE.includes(status) ? status : RESPONSE_LIFECYCLE[0]} onChange={(e) => setStatus(e.target.value)} style={{ fontSize: 12, marginBottom: 6 }} aria-label={`Response ${response.id} status`}>
-          {RESPONSE_LIFECYCLE.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
-        </select>
-        <button className="gov-btn gov-btn-secondary" type="button" onClick={() => void onSave()} disabled={busy} style={{ fontSize: 12, padding: "4px 10px" }}>
-          {busy ? "Saving…" : "Save"}
-        </button>
-      </td>
-    </tr>
+      </AppShell>
+    </ProtectedRoute>
   );
 }

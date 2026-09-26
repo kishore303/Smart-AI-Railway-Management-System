@@ -105,7 +105,7 @@ function ProfileContent() {
           <span className="gov-kv-value">{user?.department}</span>
           <span className="gov-kv-label">Role</span>
           <span className="gov-kv-value">
-            <span className={`gov-badge gov-badge-${user?.role === "AUTHORIZED_OFFICIAL" ? "navy" : user?.role === "ENGINEER_REVIEWER" ? "blue" : user?.role === "CONTROLLER" ? "amber" : "muted"}`}>
+            <span className={`gov-badge gov-badge-${user?.role === "AUTHORIZED_OFFICIAL" ? "navy" : (user?.role === "SENIOR_SECTION_ENGINEER" || user?.role === "JUNIOR_ENGINEER") ? "blue" : user?.role === "CONTROLLER" ? "amber" : "muted"}`}>
               {user?.role}
             </span>
           </span>

@@ -19,13 +19,22 @@ router = APIRouter(prefix="/api/blocks", tags=["blocks"])
 ALLOWED_MAINTENANCE_STATUSES = {"VERIFIED", "BLOCK_PLANNING", "AI_RECOMMENDATION"}
 
 # Roles allowed to create block requests
-BLOCK_CREATE_ROLES = {"ENGINEER_REVIEWER", "CONTROLLER", "AUTHORIZED_OFFICIAL"}
+BLOCK_CREATE_ROLES = {"JUNIOR_ENGINEER", "SENIOR_SECTION_ENGINEER", "CONTROLLER", "AUTHORIZED_OFFICIAL"}
 
 
-def _audit(db: Session, user_id, action, entity_id=None, old=None, new=None, desc=None):
-    # GENERATE_CANDIDATES is about block_request, not candidate row
-    is_block = "BLOCK" in action or "GENERATE_CANDIDATES" in action or "CREATE_BLOCK" in action
-    log = AuditLog(user_id=user_id, action=action, entity_type="block_request" if is_block else "block_candidate", entity_id=entity_id, old_status=old, new_status=new, description=desc)
+def _audit(db: Session, user_id, action, entity_id=None, old=None, new=None, old_status=None, new_status=None, desc=None):
+    actual_old = old_status if old_status is not None else old
+    actual_new = new_status if new_status is not None else new
+    is_block = "BLOCK" in action or "GENERATE_CANDIDATES" in action or "CREATE_BLOCK" in action or "CLEARANCE" in action or "EXECUTION" in action
+    log = AuditLog(
+        user_id=user_id,
+        action=action,
+        entity_type="block_request" if is_block else "block_candidate",
+        entity_id=entity_id,
+        old_status=actual_old,
+        new_status=actual_new,
+        description=desc,
+    )
     db.add(log)
     db.commit()
 
@@ -177,6 +186,12 @@ def get_block_request(block_id: int, current_user: User = Depends(get_current_ac
     return _to_block_out(block)
 
 
+from app.services.candidate_generator import CandidateGeneratorService
+from app.safety.engine import get_safe_candidates, validate_candidate, revalidate_candidate
+
+candidate_generator = CandidateGeneratorService()
+
+
 @router.post("/requests/{block_id}/candidates/generate", response_model=CandidateGenerateResponse)
 def generate_candidates(block_id: int, payload: dict | None = None, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
     if current_user.role not in BLOCK_CREATE_ROLES:
@@ -188,99 +203,36 @@ def generate_candidates(block_id: int, payload: dict | None = None, current_user
     if not mreq or not can_access_department_resource(current_user, mreq.department_id, db):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Department access denied")
 
-    # Clear old candidates for this block (if regenerating)
-    existing = db.query(BlockCandidate).filter(BlockCandidate.block_request_id == block_id).count()
-    # Generate 3 candidates: requested, +24h, +48h (or -24h if future far). For deterministic tests, use requested +0, +24h, +48h
-    duration = int((block.requested_end - block.requested_start).total_seconds() // 60)
-    # Fetch predicted duration if available from maintenance_predictions
-    from app.models.maintenance import MaintenancePrediction
+    body = payload or {}
+    interval_mins = int(body.get("interval_minutes") or body.get("granularity_mins") or 30)
+    max_cand = int(body.get("max_candidates") or 5)
+    buffer_mins = int(body.get("min_duration_buffer_mins") or 0)
+    window_days = int(body.get("candidate_window_days") or 1)
 
-    pred = db.query(MaintenancePrediction).filter(MaintenancePrediction.maintenance_request_id == mreq.id).order_by(MaintenancePrediction.predicted_at.desc()).first()
-    if pred and pred.predicted_duration_mins:
-        pred_duration = pred.predicted_duration_mins
-        pred_delay = pred.predicted_delay_mins
-        pred_risk = pred.asset_risk_score
-    else:
-        pred_duration = duration
-        pred_delay = None
-        pred_risk = None
-
-    candidates = []
-    base_start = block.requested_start
-    # Honor frontend controls when provided: max_candidates (1-10), 24h spacing.
-    # candidate_window_days / min_duration_buffer_mins accepted for forward-compat.
     try:
-        requested_max = int((payload or {}).get("max_candidates", 3))
-    except (TypeError, ValueError):
-        requested_max = 3
-    max_candidates = max(1, min(10, requested_max))
-    # Ensure timezone aware
-    for idx in range(max_candidates):
-        offset_hours = idx * 24
-        cand_start = base_start + timedelta(hours=offset_hours)
-        cand_end = cand_start + timedelta(minutes=duration)
-        # Planning-level conflict detection: check overlapping existing blocks/candidates on same section/track
-        # Check block_requests overlapping
-        conflict = db.query(BlockRequest).filter(
-            BlockRequest.id != block.id,
-            BlockRequest.section_id == block.section_id,
-            BlockRequest.status.notin_(["REJECTED", "CANCELLED", "COMPLETED"]),
-            BlockRequest.requested_start < cand_end,
-            BlockRequest.requested_end > cand_start,
+        gen_res = candidate_generator.generate_candidates_for_block(
+            db=db,
+            block_request_id=block_id,
+            user_id=current_user.id,
+            interval_mins=interval_mins,
+            max_candidates=max_cand,
+            min_duration_buffer_mins=buffer_mins,
+            window_days=window_days,
         )
-        if block.track_id:
-            conflict = conflict.filter((BlockRequest.track_id == block.track_id) | (BlockRequest.track_id.is_(None)))
-        has_conflict = conflict.first() is not None
-        # Check optimized_blocks
-        from app.models.block import OptimizedBlock
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 
-        opt = db.query(OptimizedBlock).filter(
-            OptimizedBlock.section_id == block.section_id,
-            OptimizedBlock.status.notin_(["REJECTED", "CANCELLED", "COMPLETED"]),
-            OptimizedBlock.start_time < cand_end,
-            OptimizedBlock.end_time > cand_start,
-        )
-        if block.track_id:
-            # only conflict if same track or optimized has null track (section-level)
-            opt = opt.filter((OptimizedBlock.track_id == block.track_id) | (OptimizedBlock.track_id.is_(None)))
-        if opt.first() is not None:
-            has_conflict = True
-
-        # Do NOT claim safety — mark planning conflict as INFEASIBLE with clear reason, otherwise FEASIBLE with disclaimer that Safety Engine pending
-        if has_conflict:
-            safety_status = "INFEASIBLE"
-            reason = "Planning-level conflict: overlapping existing block on same section/track (Safety Engine validation still required)"
-        else:
-            safety_status = "FEASIBLE"
-            reason = None  # keep null; Safety Engine will still validate
-
-        # Note: we add disclaimer via reason? For feasible, keep null but API returns disclaimer not to trust safety yet
-        cand = BlockCandidate(
-            block_request_id=block.id,
-            section_id=block.section_id,
-            track_id=block.track_id,
-            candidate_start=cand_start,
-            candidate_end=cand_end,
-            predicted_duration_mins=pred_duration,
-            predicted_delay_mins=pred_delay,
-            asset_risk_score=pred_risk,
-            safety_status=safety_status,
-            safety_rejection_reason=reason,
-            optimization_score=None,  # OR-Tools not yet
-            is_selected=False,
-        )
-        db.add(cand)
-        candidates.append(cand)
-
-    db.commit()
-    for c in candidates:
-        db.refresh(c)
-    # Audit
-    _audit(db, current_user.id, "GENERATE_CANDIDATES", entity_id=block.id, old=None, new=None, desc=f"Generated {len(candidates)} candidates for {block.block_code}")
-
+    # Fetch persisted candidates for response
+    candidates = db.query(BlockCandidate).filter(BlockCandidate.block_request_id == block_id).order_by(BlockCandidate.candidate_start.asc()).all()
     outs = [_to_candidate_out(c) for c in candidates]
-    msg = "Candidates generated at planning level only — Safety Engine validation and OR-Tools optimization still required before approval. Do NOT treat FEASIBLE as safe."
-    return CandidateGenerateResponse(generated=len(outs), candidates=outs, message=msg)
+
+    return CandidateGenerateResponse(
+        generated=len(outs),
+        safe_candidates_count=gen_res["safe_candidates_count"],
+        unsafe_candidates_count=gen_res["unsafe_candidates_count"],
+        candidates=outs,
+        message=gen_res["message"],
+    )
 
 
 @router.get("/requests/{block_id}/candidates", response_model=list[CandidateOut])
@@ -295,6 +247,17 @@ def list_candidates(block_id: int, current_user: User = Depends(get_current_acti
     return [_to_candidate_out(c) for c in cands]
 
 
+@router.get("/requests/{block_id}/candidates/safe")
+def list_safe_candidates(block_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    block = db.query(BlockRequest).filter(BlockRequest.id == block_id).first()
+    if not block:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Block request not found")
+    mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == block.maintenance_request_id).first()
+    if not mreq or not can_access_department_resource(current_user, mreq.department_id, db):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Department access denied")
+    return get_safe_candidates(block_id, db)
+
+
 @router.get("/candidates/{candidate_id}", response_model=CandidateOut)
 def get_candidate(candidate_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
     cand = db.query(BlockCandidate).filter(BlockCandidate.id == candidate_id).first()
@@ -305,3 +268,360 @@ def get_candidate(candidate_id: int, current_user: User = Depends(get_current_ac
     if not mreq or not can_access_department_resource(current_user, mreq.department_id, db):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Department access denied")
     return _to_candidate_out(cand)
+
+
+@router.post("/candidates/{candidate_id}/revalidate")
+def revalidate_candidate_endpoint(candidate_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    if current_user.role not in BLOCK_CREATE_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role cannot revalidate candidates")
+    cand = db.query(BlockCandidate).filter(BlockCandidate.id == candidate_id).first()
+    if not cand:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found")
+    block = db.query(BlockRequest).filter(BlockRequest.id == cand.block_request_id).first()
+    mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == block.maintenance_request_id).first()
+    if not mreq or not can_access_department_resource(current_user, mreq.department_id, db):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Department access denied")
+
+    result = revalidate_candidate(candidate_id, db, user_id=current_user.id)
+    return result
+
+
+# ============================================================
+# PHASE 8 BLOCK LIFECYCLE & EXECUTION STATE MACHINE
+# ============================================================
+
+from app.models.block import OptimizedBlock, OptimizedBlockSource, BlockResourceAllocation
+from app.models.notification import Notification
+
+
+class BlockActionPayload(dict):
+    pass
+
+
+@router.get("/scheduled")
+def list_scheduled_blocks(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    obs = db.query(OptimizedBlock).filter(OptimizedBlock.status.in_(["SCHEDULED", "APPROVED"])).order_by(OptimizedBlock.start_time.asc()).all()
+    results = []
+    for ob in obs:
+        src = db.query(OptimizedBlockSource).filter(OptimizedBlockSource.optimized_block_id == ob.id).first()
+        blk = db.query(BlockRequest).filter(BlockRequest.id == src.block_request_id).first() if src else None
+        mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == blk.maintenance_request_id).first() if blk else None
+        results.append({
+            "optimized_block_id": ob.id,
+            "block_code": ob.block_code,
+            "section_id": ob.section_id,
+            "track_id": ob.track_id,
+            "start_time": ob.start_time.isoformat() if ob.start_time else None,
+            "end_time": ob.end_time.isoformat() if ob.end_time else None,
+            "duration_mins": ob.total_duration_mins,
+            "status": ob.status,
+            "approved_by": ob.approved_by,
+            "approved_at": ob.approved_at.isoformat() if ob.approved_at else None,
+            "department": mreq.department_id if mreq else None,
+        })
+    return results
+
+
+@router.get("/active")
+def list_active_blocks(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    obs = db.query(OptimizedBlock).filter(OptimizedBlock.status.in_(["ACTIVE", "MAINTENANCE", "CLEARANCE_PENDING"])).order_by(OptimizedBlock.start_time.asc()).all()
+    results = []
+    for ob in obs:
+        src = db.query(OptimizedBlockSource).filter(OptimizedBlockSource.optimized_block_id == ob.id).first()
+        blk = db.query(BlockRequest).filter(BlockRequest.id == src.block_request_id).first() if src else None
+        mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == blk.maintenance_request_id).first() if blk else None
+        results.append({
+            "optimized_block_id": ob.id,
+            "block_code": ob.block_code,
+            "section_id": ob.section_id,
+            "track_id": ob.track_id,
+            "start_time": ob.start_time.isoformat() if ob.start_time else None,
+            "end_time": ob.end_time.isoformat() if ob.end_time else None,
+            "duration_mins": ob.total_duration_mins,
+            "status": ob.status,
+            "approved_by": ob.approved_by,
+            "department": mreq.department_id if mreq else None,
+        })
+    return results
+
+
+@router.post("/{block_id}/activate")
+def activate_block(
+    block_id: int,
+    payload: Optional[dict] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in ("AUTHORIZED_OFFICIAL", "CONTROLLER", "SENIOR_SECTION_ENGINEER"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role cannot activate blocks")
+
+    ob = db.query(OptimizedBlock).filter(OptimizedBlock.id == block_id).with_for_update().first()
+    if not ob:
+        # Check if block_id is a block_request id
+        src = db.query(OptimizedBlockSource).filter(OptimizedBlockSource.block_request_id == block_id).first()
+        if src:
+            ob = db.query(OptimizedBlock).filter(OptimizedBlock.id == src.optimized_block_id).with_for_update().first()
+
+    if not ob:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Block not found")
+
+    # Strict state transition: Must be SCHEDULED or APPROVED
+    if ob.status not in ("SCHEDULED", "APPROVED"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Invalid state transition: Cannot activate block in status '{ob.status}'. Must be SCHEDULED or APPROVED."
+        )
+
+    previous_status = ob.status
+    ob.status = "ACTIVE"
+    now_utc = datetime.now(timezone.utc)
+
+    # Update source and maintenance requests
+    src = db.query(OptimizedBlockSource).filter(OptimizedBlockSource.optimized_block_id == ob.id).first()
+    if src:
+        blk = db.query(BlockRequest).filter(BlockRequest.id == src.block_request_id).first()
+        if blk:
+            blk.status = "ACTIVE"
+            mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == blk.maintenance_request_id).first()
+            if mreq:
+                mreq.status = "IN_PROGRESS"
+
+    db.commit()
+    db.refresh(ob)
+
+    body = payload or {}
+    is_simulation = body.get("simulation", True)
+    mode_label = "SIMULATION / DEMO ACTIVATION" if is_simulation else "OPERATIONAL ACTIVATION"
+
+    _audit(
+        db=db,
+        user_id=current_user.id,
+        action="EXECUTION_START",
+        entity_id=ob.id,
+        old_status=previous_status,
+        new_status="ACTIVE",
+        desc=f"Block {ob.block_code} activated ({mode_label}) by {current_user.name}.",
+    )
+
+    return {
+        "optimized_block_id": ob.id,
+        "block_code": ob.block_code,
+        "previous_status": previous_status,
+        "status": ob.status,
+        "activated_by": current_user.id,
+        "activated_at": now_utc.isoformat(),
+        "mode": mode_label,
+        "message": f"Block {ob.block_code} is now ACTIVE ({mode_label}). Track/section isolation is marked in decision-support state.",
+    }
+
+
+@router.post("/{block_id}/maintenance")
+def set_maintenance_state(
+    block_id: int,
+    payload: Optional[dict] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in ("AUTHORIZED_OFFICIAL", "CONTROLLER", "SENIOR_SECTION_ENGINEER", "JUNIOR_ENGINEER", "MAINTENANCE_STAFF"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role cannot update maintenance status")
+
+    ob = db.query(OptimizedBlock).filter(OptimizedBlock.id == block_id).with_for_update().first()
+    if not ob:
+        src = db.query(OptimizedBlockSource).filter(OptimizedBlockSource.block_request_id == block_id).first()
+        if src:
+            ob = db.query(OptimizedBlock).filter(OptimizedBlock.id == src.optimized_block_id).with_for_update().first()
+    if not ob:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Block not found")
+
+    if ob.status != "ACTIVE":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Invalid state transition: Cannot enter MAINTENANCE from status '{ob.status}'. Must be ACTIVE."
+        )
+
+    previous_status = ob.status
+    ob.status = "MAINTENANCE"
+    db.commit()
+    db.refresh(ob)
+
+    _audit(
+        db=db,
+        user_id=current_user.id,
+        action="MAINTENANCE_IN_PROGRESS",
+        entity_id=ob.id,
+        old_status=previous_status,
+        new_status="MAINTENANCE",
+        desc=f"Maintenance work actively in progress for block {ob.block_code}.",
+    )
+
+    return {
+        "optimized_block_id": ob.id,
+        "block_code": ob.block_code,
+        "status": ob.status,
+        "message": f"Block {ob.block_code} marked as MAINTENANCE in progress.",
+    }
+
+
+@router.post("/{block_id}/clearance")
+def request_clearance(
+    block_id: int,
+    payload: Optional[dict] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in ("AUTHORIZED_OFFICIAL", "CONTROLLER", "SENIOR_SECTION_ENGINEER", "JUNIOR_ENGINEER"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role cannot request clearance")
+
+    ob = db.query(OptimizedBlock).filter(OptimizedBlock.id == block_id).with_for_update().first()
+    if not ob:
+        src = db.query(OptimizedBlockSource).filter(OptimizedBlockSource.block_request_id == block_id).first()
+        if src:
+            ob = db.query(OptimizedBlock).filter(OptimizedBlock.id == src.optimized_block_id).with_for_update().first()
+    if not ob:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Block not found")
+
+    if ob.status not in ("ACTIVE", "MAINTENANCE"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Invalid state transition: Cannot request clearance from status '{ob.status}'. Must be ACTIVE or MAINTENANCE."
+        )
+
+    previous_status = ob.status
+    ob.status = "CLEARANCE_PENDING"
+    db.commit()
+    db.refresh(ob)
+
+    _audit(
+        db=db,
+        user_id=current_user.id,
+        action="CLEARANCE_REQUESTED",
+        entity_id=ob.id,
+        old_status=previous_status,
+        new_status="CLEARANCE_PENDING",
+        desc=f"Safety and track clearance requested for block {ob.block_code}.",
+    )
+
+    return {
+        "optimized_block_id": ob.id,
+        "block_code": ob.block_code,
+        "status": ob.status,
+        "message": f"Block {ob.block_code} is now in CLEARANCE_PENDING state. Track inspection and clearance check required before release.",
+    }
+
+
+@router.post("/{block_id}/release")
+def release_block(
+    block_id: int,
+    payload: Optional[dict] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in ("AUTHORIZED_OFFICIAL", "CONTROLLER"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Authorized Official or Controller can release blocks")
+
+    ob = db.query(OptimizedBlock).filter(OptimizedBlock.id == block_id).with_for_update().first()
+    if not ob:
+        src = db.query(OptimizedBlockSource).filter(OptimizedBlockSource.block_request_id == block_id).first()
+        if src:
+            ob = db.query(OptimizedBlock).filter(OptimizedBlock.id == src.optimized_block_id).with_for_update().first()
+    if not ob:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Block not found")
+
+    # Strict clearance requirement: cannot jump directly from ACTIVE to RELEASED without CLEARANCE_PENDING
+    if ob.status != "CLEARANCE_PENDING":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Invalid state transition: Cannot release block in status '{ob.status}'. Clearance check is mandatory (must be CLEARANCE_PENDING)."
+        )
+
+    previous_status = ob.status
+    ob.status = "RELEASED"
+
+    # Release any allocated resources
+    allocs = db.query(BlockResourceAllocation).filter(BlockResourceAllocation.block_id == ob.id, BlockResourceAllocation.status == "ALLOCATED").all()
+    for al in allocs:
+        al.status = "RELEASED"
+
+    db.commit()
+    db.refresh(ob)
+
+    _audit(
+        db=db,
+        user_id=current_user.id,
+        action="CLEARANCE_GRANTED",
+        entity_id=ob.id,
+        old_status=previous_status,
+        new_status="RELEASED",
+        desc=f"Block {ob.block_code} cleared and RELEASED by {current_user.name}.",
+    )
+
+    return {
+        "optimized_block_id": ob.id,
+        "block_code": ob.block_code,
+        "status": ob.status,
+        "message": f"Block {ob.block_code} successfully released. Track is cleared for normal train traffic.",
+    }
+
+
+@router.post("/{block_id}/complete")
+def complete_block(
+    block_id: int,
+    payload: Optional[dict] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in ("AUTHORIZED_OFFICIAL", "CONTROLLER", "SENIOR_SECTION_ENGINEER"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role cannot complete blocks")
+
+    ob = db.query(OptimizedBlock).filter(OptimizedBlock.id == block_id).with_for_update().first()
+    if not ob:
+        src = db.query(OptimizedBlockSource).filter(OptimizedBlockSource.block_request_id == block_id).first()
+        if src:
+            ob = db.query(OptimizedBlock).filter(OptimizedBlock.id == src.optimized_block_id).with_for_update().first()
+    if not ob:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Block not found")
+
+    if ob.status not in ("RELEASED", "ACTIVE", "CLEARANCE_PENDING"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot complete block from status '{ob.status}'."
+        )
+
+    previous_status = ob.status
+    ob.status = "COMPLETED"
+
+    src = db.query(OptimizedBlockSource).filter(OptimizedBlockSource.optimized_block_id == ob.id).first()
+    if src:
+        blk = db.query(BlockRequest).filter(BlockRequest.id == src.block_request_id).first()
+        if blk:
+            blk.status = "COMPLETED"
+            mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == blk.maintenance_request_id).first()
+            if mreq:
+                mreq.status = "COMPLETED"
+
+    # Release any lingering resources
+    allocs = db.query(BlockResourceAllocation).filter(BlockResourceAllocation.block_id == ob.id, BlockResourceAllocation.status == "ALLOCATED").all()
+    for al in allocs:
+        al.status = "RELEASED"
+
+    db.commit()
+    db.refresh(ob)
+
+    _audit(
+        db=db,
+        user_id=current_user.id,
+        action="EXECUTION_COMPLETE",
+        entity_id=ob.id,
+        old_status=previous_status,
+        new_status="COMPLETED",
+        desc=f"Block {ob.block_code} completed and closed.",
+    )
+
+    return {
+        "optimized_block_id": ob.id,
+        "block_code": ob.block_code,
+        "status": ob.status,
+        "message": f"Block {ob.block_code} execution lifecycle is completed.",
+    }
+
+

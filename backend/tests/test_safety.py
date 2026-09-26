@@ -31,7 +31,9 @@ tok_ctrl = login("control.controller@irctc.test","Control@123")
 # Clean
 db=SessionLocal()
 db.execute(text("DELETE FROM safety_validations"))
-db.execute(text("DELETE FROM notifications WHERE integration_request_id IS NOT NULL"))
+db.execute(text("DELETE FROM notifications"))
+db.execute(text("DELETE FROM optimized_block_sources"))
+db.execute(text("DELETE FROM optimized_blocks"))
 from app.models.block import BlockIntegrationRequest
 db.query(BlockIntegrationRequest).delete()
 db.query(BlockCandidate).delete()

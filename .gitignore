@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 *.pyc
 *.egg-info/
+*.tsbuildinfo
 .venv/
 venv/
 env/
@@ -55,12 +56,24 @@ Thumbs.db
 # Jupyter / notebooks
 .ipynb_checkpoints/
 
-# Model artifacts / generated files
-model_artifacts/
+# Model artifacts / generated files (general protection)
 *.h5
 *.pkl
 *.joblib
 *.onnx
+model_artifacts/
+models/
+
+# Explicitly allow required runtime model artifacts and datasets for SIH26027
+!backend/model_artifacts/
+!backend/model_artifacts/**
+!backend/model_artifacts/**/*.joblib
+!backend/model_artifacts/**/*.csv
+!data/
+!data/**
+!data/**/*.joblib
+!data/**/*.csv
 
 # Alembic local config
 alembic.ini
+

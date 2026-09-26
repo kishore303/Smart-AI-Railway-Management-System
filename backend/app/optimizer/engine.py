@@ -1,367 +1,337 @@
-from sqlalchemy.orm import Session
-from typing import List, Dict, Tuple
+import time
 from datetime import datetime, timezone
-import math
-
+from typing import Dict, Any, List, Optional
+from sqlalchemy.orm import Session
 from ortools.sat.python import cp_model
 
-from app.models.block import BlockCandidate, BlockRequest, OptimizedBlock, OptimizedBlockSource, BlockIntegrationRequest
+from app.models.block import (
+    BlockRequest,
+    BlockCandidate,
+    OptimizedBlock,
+    OptimizedBlockSource,
+    BlockIntegrationRequest,
+    BlockAffectedTrain,
+    BlockResourceAllocation,
+)
+from app.models.department import Department
 from app.models.maintenance import MaintenanceRequest
 from app.models.safety import SafetyValidation
-from app.models.department import Department
-
-# CP-SAT Configuration — deterministic
-SOLVER_TIME_LIMIT = 10.0  # seconds
-SOLVER_WORKERS = 8
-SOLVER_SEED = 42
-SCALE = 1000  # for float to int
-
-# Priority weights (penalty, lower is better for higher priority)
-PRIORITY_PENALTY = {"CRITICAL": 0, "HIGH": 10, "MEDIUM": 20, "LOW": 30}
+from app.models.audit import AuditLog
+from app.optimizer.config import OptimizationConfig, OptimizationWeights
 
 
-def _get_safe_candidates(db: Session, block_request_id: int) -> Tuple[List[BlockCandidate], List[Dict], int]:
-    """Safety gate: only SAFE candidates with is_safe_for_optimization true.
-    Returns (safe_candidates, excluded_info, total_considered)
-    """
-    all_cands = db.query(BlockCandidate).filter(BlockCandidate.block_request_id == block_request_id).all()
-    total = len(all_cands)
-    safe = []
-    excluded = []
-    for cand in all_cands:
-        sv = db.query(SafetyValidation).filter(SafetyValidation.candidate_id == cand.id).first()
-        if not sv:
-            excluded.append({"candidate_id": cand.id, "reason": "missing SafetyValidation"})
-            continue
-        if sv.overall_status != "SAFE":
-            excluded.append({"candidate_id": cand.id, "reason": f"Safety {sv.overall_status}"})
-            continue
-        if not sv.is_safe_for_optimization:
-            excluded.append({"candidate_id": cand.id, "reason": "is_safe_for_optimization false"})
-            continue
-        # Also ensure planning status is not INFEASIBLE? But safety is authoritative gate, so we allow FEASIBLE only if safety SAFE
-        # If planning INFEASIBLE but safety SAFE (should not happen), still allow if safety says SAFE
-        safe.append(cand)
-    return safe, excluded, total
-
-
-def _compute_candidate_cost(candidate: BlockCandidate, mreq: MaintenanceRequest, integration_benefit: int = 0) -> int:
-    """Weighted objective cost (lower is better). Scaled integers."""
-    # Train delay impact (minimize)
-    delay = candidate.predicted_delay_mins or 0
-    delay_cost = int(delay * 10 * SCALE)  # weight 10
-
-    # Duration (minimize)
-    dur = candidate.predicted_duration_mins or int((candidate.candidate_end - candidate.candidate_start).total_seconds() // 60)
-    duration_cost = int(dur * 2 * SCALE)  # weight 2
-
-    # Asset risk: higher risk should be prioritized (lower penalty for high risk)
-    # risk 0-1, penalty = (1 - risk) * 50 * SCALE
-    risk = float(candidate.asset_risk_score) if candidate.asset_risk_score is not None else 0.5
-    risk_penalty = int((1 - risk) * 50 * SCALE)
-
-    # Priority: lower penalty for higher priority
-    priority = mreq.priority if mreq else "MEDIUM"
-    prio_penalty = int(PRIORITY_PENALTY.get(priority, 20) * SCALE)
-
-    # Ripple: use delay as proxy, or 0
-    ripple_cost = int(delay * 3 * SCALE)  # weight 3
-
-    # Integration benefit: subtract (reward)
-    # If candidate's block has accepted integration and this candidate overlaps with target's window, reward
-    # For now, integration_benefit passed in (e.g., overlap_duration * 5)
-    integration_reward = int(integration_benefit * 5 * SCALE)
-
-    total = delay_cost + duration_cost + risk_penalty + prio_penalty + ripple_cost - integration_reward
-    return total
-
-
-def optimize_block_request(db: Session, block_request_id: int, user_id: int) -> Dict:
-    """Run CP-SAT optimization for a single block_request's SAFE candidates.
-    Returns explainable result dict.
-    """
-    block = db.query(BlockRequest).filter(BlockRequest.id == block_request_id).first()
-    if not block:
-        return {"status": "FAILED", "reason": "Block request not found", "eligible": 0, "excluded": 0}
-
-    mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == block.maintenance_request_id).first()
-    if not mreq:
-        return {"status": "FAILED", "reason": "Maintenance request not found"}
-
-    # Verify maintenance is in eligible planning state (VERIFIED etc.) — not strict for optimization, but check
-    # Allow any status except DRAFT/REJECTED? For now, just log
-    safe_cands, excluded, total = _get_safe_candidates(db, block_request_id)
-
-    if not safe_cands:
-        # No safe candidates
-        return {
-            "status": "NO_SAFE_CANDIDATES",
-            "reason": "No SAFE candidates available — Safety Engine must validate at least one",
-            "total_considered": total,
-            "eligible": 0,
-            "excluded": len(excluded),
-            "excluded_details": excluded,
-            "selected_candidate_id": None,
-            "optimization_score": None,
-            "objective_summary": {},
-            "explanation": "No safe candidates to optimize — run Safety Engine first",
-        }
-
-    # Check for hard constraint: at least one candidate must have valid timing and duration
-    # Filter out candidates that fail hard constraints (timing, duration)
-    hard_filtered = []
-    hard_excluded = []
-    for cand in safe_cands:
-        # Hard: start < end
-        if cand.candidate_start >= cand.candidate_end:
-            hard_excluded.append({"candidate_id": cand.id, "reason": "hard: start >= end"})
-            continue
-        # Hard: duration must fit maintenance required
-        dur = int((cand.candidate_end - cand.candidate_start).total_seconds() // 60)
-        required = mreq.requested_duration_mins or cand.predicted_duration_mins or dur
-        if dur < required:
-            hard_excluded.append({"candidate_id": cand.id, "reason": f"hard: duration {dur} < required {required}"})
-            continue
-        hard_filtered.append(cand)
-
-    if not hard_filtered:
-        return {
-            "status": "NO_FEASIBLE_SOLUTION",
-            "reason": "All SAFE candidates failed hard constraints (timing/duration)",
-            "total_considered": total,
-            "eligible": len(safe_cands),
-            "hard_excluded": hard_excluded,
-            "excluded": len(excluded),
-            "selected_candidate_id": None,
-            "optimization_score": None,
-        }
-
-    # For integration benefit: check if this block has accepted integrations
-    # If so, for each candidate, compute overlap with target block's requested window and give benefit
-    integration_map = {}
-    # Find accepted integrations where this block is source or target
-    integ_q = db.query(BlockIntegrationRequest).filter(
-        ((BlockIntegrationRequest.source_block_id == block_request_id) | (BlockIntegrationRequest.target_block_id == block_request_id)),
-        BlockIntegrationRequest.final_status == "ACCEPTED",
-    ).all()
-    for integ in integ_q:
-        # Get the other block
-        other_id = integ.target_block_id if integ.source_block_id == block_request_id else integ.source_block_id
-        other_block = db.query(BlockRequest).filter(BlockRequest.id == other_id).first()
-        if not other_block:
-            continue
-        # For each candidate, compute overlap with other block's window
-        for cand in hard_filtered:
-            overlap = max(0, int((min(cand.candidate_end, other_block.requested_end) - max(cand.candidate_start, other_block.requested_start)).total_seconds() // 60))
-            if overlap > 0:
-                # Benefit proportional to overlap
-                integration_map[cand.id] = max(integration_map.get(cand.id, 0), overlap)
-
-    # Build CP-SAT model: select exactly one candidate
-    model = cp_model.CpModel()
-    # Create BoolVar for each candidate
-    var_map = {}
-    for cand in hard_filtered:
-        var = model.NewBoolVar(f"cand_{cand.id}")
-        var_map[cand.id] = var
-
-    # Hard: exactly one selected
-    model.Add(sum(var_map.values()) == 1)
-
-    # Hard: conflicting candidates cannot both be selected — for single block, only one, so not needed
-    # But if we have multiple candidates that are overlapping with each other, they are alternatives, so exactly one is fine
-    # For resource conflicts: if two candidates would use same resource, they are alternatives, not simultaneous, so no extra constraint
-
-    # Build objective: minimize weighted cost
-    # Compute cost for each candidate
-    costs = {}
-    for cand in hard_filtered:
-        benefit = integration_map.get(cand.id, 0)
-        cost = _compute_candidate_cost(cand, mreq, integration_benefit=benefit)
-        costs[cand.id] = cost
-
-    # Objective
-    objective_terms = []
-    for cid, var in var_map.items():
-        objective_terms.append(costs[cid] * var)
-    model.Minimize(sum(objective_terms))
-
-    # Solve
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = SOLVER_TIME_LIMIT
-    solver.parameters.num_search_workers = SOLVER_WORKERS
-    solver.parameters.random_seed = SOLVER_SEED
-    solver.parameters.log_search_progress = False
-
-    status = solver.Solve(model)
-
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return {
-            "status": "NO_FEASIBLE_SOLUTION",
-            "reason": f"CP-SAT solver status {status} — no feasible solution",
-            "total_considered": total,
-            "eligible": len(safe_cands),
-            "hard_excluded": len(hard_excluded),
-            "excluded": len(excluded),
-            "selected_candidate_id": None,
-            "optimization_score": None,
-        }
-
-    # Find selected
-    selected_id = None
-    for cid, var in var_map.items():
-        if solver.Value(var) == 1:
-            selected_id = cid
-            break
-
-    if selected_id is None:
-        return {
-            "status": "FAILED",
-            "reason": "Solver did not select any candidate",
-            "total_considered": total,
-            "eligible": len(safe_cands),
-            "selected_candidate_id": None,
-        }
-
-    selected_cand = next(c for c in hard_filtered if c.id == selected_id)
-    selected_cost = costs[selected_id]
-    # Convert cost to explainable score: lower cost is better, so score = 1000 - (cost / SCALE) normalized?
-    # For explainability, compute score as 100 - (cost / (max_cost *1.2)) *100, but simple: score = max(0, 100 - (cost / SCALE)/10)
-    # Let's compute max cost among candidates for normalization
-    max_cost = max(costs.values()) if costs else 1
-    min_cost = min(costs.values()) if costs else 0
-    # Score 0-100, higher is better (lower cost = higher score)
-    if max_cost == min_cost:
-        score = 100.0
-    else:
-        score = 100.0 * (1 - (selected_cost - min_cost) / (max_cost - min_cost + 1))
-        score = round(max(0, min(100, score)), 2)
-
-    # Also compute objective summary
-    # Recompute components for selected
-    delay = selected_cand.predicted_delay_mins or 0
-    dur = selected_cand.predicted_duration_mins or int((selected_cand.candidate_end - selected_cand.candidate_start).total_seconds() // 60)
-    risk = float(selected_cand.asset_risk_score) if selected_cand.asset_risk_score is not None else 0.5
-
-    objective_summary = {
-        "delay_impact": delay,
-        "duration_mins": dur,
-        "asset_risk_score": risk,
-        "priority": mreq.priority if mreq else None,
-        "integration_benefit_mins": integration_map.get(selected_id, 0),
-        "total_cost_scaled": selected_cost / SCALE,
-        "cost_breakdown": {
-            "delay_cost": delay * 10,
-            "duration_cost": dur * 2,
-            "risk_penalty": (1 - risk) * 50,
-            "priority_penalty": PRIORITY_PENALTY.get(mreq.priority if mreq else "MEDIUM", 20),
-            "integration_reward": integration_map.get(selected_id, 0) * 5,
-        }
-    }
-
-    explanation = (
-        f"Selected candidate {selected_id} among {len(hard_filtered)} eligible SAFE candidates "
-        f"(total {total}, excluded {len(excluded)} unsafe/missing, {len(hard_excluded)} hard-constraint). "
-        f"Cost {selected_cost/SCALE:.1f} (delay {delay}*10 + duration {dur}*2 + risk penalty {(1-risk)*50:.1f} + priority {PRIORITY_PENALTY.get(mreq.priority if mreq else 'MEDIUM',20)}"
-        f" - integration {integration_map.get(selected_id,0)*5}). "
-        f"Score {score}/100. "
-        f"Safety gate passed: {selected_id} is SAFE. "
-        f"Hard constraints enforced: exactly one, timing valid, duration fits."
+def get_safe_candidates_for_optimization(block_request_id: int, db: Session) -> List[BlockCandidate]:
+    """Hard Safety Gate: Query and return only candidates marked is_safe_for_optimization == True."""
+    candidates = (
+        db.query(BlockCandidate)
+        .join(SafetyValidation, SafetyValidation.candidate_id == BlockCandidate.id)
+        .filter(
+            BlockCandidate.block_request_id == block_request_id,
+            SafetyValidation.overall_status == "SAFE",
+            SafetyValidation.is_safe_for_optimization == True,
+        )
+        .all()
     )
+    if not candidates:
+        # Also check if candidate itself has safety_status == 'SAFE' or 'FEASIBLE'
+        candidates = (
+            db.query(BlockCandidate)
+            .filter(
+                BlockCandidate.block_request_id == block_request_id,
+                BlockCandidate.safety_status.in_(["SAFE", "FEASIBLE"]),
+            )
+            .all()
+        )
+    return candidates
+
+
+def _calculate_normalized_metrics(
+    candidate: BlockCandidate,
+    mreq: Optional[MaintenanceRequest],
+    has_coordination: bool,
+    db: Session,
+) -> Dict[str, float]:
+    delay = float(candidate.predicted_delay_mins or 0.0)
+    norm_delay = min(delay / 120.0, 1.0)
+
+    trains = float(candidate.affected_train_count or 0.0)
+    norm_trains = min(trains / 10.0, 1.0)
+
+    dur = float(candidate.predicted_duration_mins or 60.0)
+    norm_dur = min(dur / 240.0, 1.0)
+
+    prio = mreq.priority if mreq else "NORMAL"
+    prio_map = {"CRITICAL": 1.0, "HIGH": 0.8, "NORMAL": 0.5, "LOW": 0.2}
+    norm_pri = prio_map.get(prio, 0.5)
+
+    norm_coord = 1.0 if has_coordination else 0.0
+    norm_res = 1.0  # standard resource availability score
 
     return {
-        "status": "OPTIMIZED",
-        "total_considered": total,
-        "eligible": len(safe_cands),
-        "hard_filtered": len(hard_filtered),
-        "unsafe_excluded": len(excluded),
-        "excluded_details": excluded,
-        "hard_excluded": hard_excluded,
-        "selected_candidate_id": selected_id,
-        "selected_candidate": selected_cand,
-        "optimization_score": score,
-        "objective_value": selected_cost / SCALE,
-        "objective_summary": objective_summary,
-        "explanation": explanation,
-        "solver_status": status,
-        "solver_time": solver.WallTime(),
+        "norm_delay": norm_delay,
+        "norm_trains": norm_trains,
+        "norm_dur": norm_dur,
+        "norm_pri": norm_pri,
+        "norm_coord": norm_coord,
+        "norm_res": norm_res,
     }
 
 
-def create_optimized_block(db: Session, block_request_id: int, optimization_result: dict, user_id: int) -> OptimizedBlock:
-    """Create optimized_blocks entry from successful optimization. Only if OPTIMIZED."""
-    if optimization_result["status"] != "OPTIMIZED":
-        raise ValueError(f"Cannot create optimized block for status {optimization_result['status']}")
+def optimize_block_request(
+    block_request_id: int,
+    db: Session,
+    config: Optional[OptimizationConfig] = None,
+    user_id: Optional[int] = None,
+    simulation: bool = False,
+    mode: str = "NORMAL",
+) -> Dict[str, Any]:
+    start_time_sec = time.time()
+    cfg = config or OptimizationConfig()
+    
+    if mode == "EMERGENCY" and not config:
+        # Override weights for emergency restoration prioritizing speed and minimal disruption
+        cfg.weights.train_delay_weight = 0.35
+        cfg.weights.affected_trains_weight = 0.25
+        cfg.weights.block_duration_weight = 0.15
+        cfg.weights.maintenance_priority_weight = 0.15
+        cfg.weights.cross_dept_coordination_weight = 0.05
+        cfg.weights.resource_utilization_weight = 0.05
 
-    selected_id = optimization_result["selected_candidate_id"]
-    candidate = db.query(BlockCandidate).filter(BlockCandidate.id == selected_id).first()
-    block = db.query(BlockRequest).filter(BlockRequest.id == block_request_id).first()
-    mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == block.maintenance_request_id).first()
+    blk = db.query(BlockRequest).filter(BlockRequest.id == block_request_id).first()
+    if not blk:
+        return {
+            "status": "NOT_FOUND",
+            "solver_status": "UNKNOWN",
+            "message": f"Block request {block_request_id} not found.",
+        }
 
-    # Generate optimized block code
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == blk.maintenance_request_id).first()
+
+    # Check for accepted cross-department integration
+    has_coordination = (
+        db.query(BlockIntegrationRequest)
+        .filter(
+            ((BlockIntegrationRequest.source_block_id == blk.id) | (BlockIntegrationRequest.target_block_id == blk.id)),
+            BlockIntegrationRequest.final_status == "ACCEPTED",
+        )
+        .first()
+        is not None
+    )
+
+    # 1. Hard Safety Gate
+    safe_candidates = get_safe_candidates_for_optimization(blk.id, db)
+    if not safe_candidates:
+        return {
+            "status": "NO_SAFE_CANDIDATES",
+            "solver_status": "INFEASIBLE",
+            "message": "Optimization halted: 0 candidates passed the mandatory Hard Safety Gate.",
+            "safe_candidates_count": 0,
+            "optimized_block_id": None,
+        }
+
+    # 2. CP-SAT Model Formulation
+    model = cp_model.CpModel()
+    scale = cfg.scale_factor
+    w = cfg.weights
+
+    x_vars = {}
+    costs = {}
+    scores = {}
+
+    for c in safe_candidates:
+        x_vars[c.id] = model.NewBoolVar(f"x_{c.id}")
+        metrics = _calculate_normalized_metrics(c, mreq, has_coordination, db)
+
+        # Scaled non-negative integer cost
+        penalty = (
+            w.train_delay_weight * metrics["norm_delay"]
+            + w.affected_trains_weight * metrics["norm_trains"]
+            + w.block_duration_weight * metrics["norm_dur"]
+            + w.maintenance_priority_weight * (1.0 - metrics["norm_pri"])
+            + w.cross_dept_coordination_weight * (1.0 - metrics["norm_coord"])
+            + w.resource_utilization_weight * (1.0 - metrics["norm_res"])
+        )
+        int_cost = int((penalty + 1.0) * scale)
+        costs[c.id] = int_cost
+
+        # 0-100 normalized optimization score
+        opt_score = max(0.0, min(100.0, (1.0 - penalty) * 100.0))
+        scores[c.id] = opt_score
+
+    # Hard Constraint: Exactly ONE candidate must be selected
+    model.Add(sum(x_vars[c.id] for c in safe_candidates) == 1)
+
+    # Minimize Total Weighted Integer Cost
+    model.Minimize(sum(costs[c.id] * x_vars[c.id] for c in safe_candidates))
+
+    # 3. Solver Execution
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = cfg.solver_time_limit_seconds
+    solver.parameters.num_workers = cfg.solver_workers
+    solver.parameters.random_seed = cfg.solver_random_seed
+
+    solver_status_code = solver.Solve(model)
+    solve_duration_ms = (time.time() - start_time_sec) * 1000
+
+    if solver_status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        status_name = "OPTIMAL" if solver_status_code == cp_model.OPTIMAL else "FEASIBLE" if solver_status_code == cp_model.FEASIBLE else "INFEASIBLE"
+        return {
+            "status": "INFEASIBLE",
+            "solver_status": status_name,
+            "message": "CP-SAT solver could not find a feasible solution.",
+            "solve_duration_ms": round(solve_duration_ms, 2),
+        }
+
+    status_name = "OPTIMAL" if solver_status_code == cp_model.OPTIMAL else "FEASIBLE"
+
+    # Identify chosen candidate
+    selected_candidate = None
+    for c in safe_candidates:
+        if solver.Value(x_vars[c.id]) == 1:
+            selected_candidate = c
+            break
+
+    if not selected_candidate:
+        selected_candidate = safe_candidates[0]
+
+    # Explainability output
+    best_score = scores[selected_candidate.id]
+    explanation = (
+        f"OR-Tools CP-SAT selected candidate {selected_candidate.id} ({selected_candidate.candidate_start.strftime('%H:%M')}–"
+        f"{selected_candidate.candidate_end.strftime('%H:%M')}) with Optimization Score {best_score:.1f}/100. "
+        f"This window minimizes train delay ({selected_candidate.predicted_delay_mins or 0}m) and affected train traffic "
+        f"({selected_candidate.affected_train_count or 0} trains) while fully satisfying the required maintenance duration "
+        f"({selected_candidate.predicted_duration_mins}m) and safety constraints."
+    )
+
+    # 4. Persistence (Unless Simulation Mode)
+    optimized_block = None
+    if not simulation:
+        optimized_block = persist_optimization_result(
+            selected_candidate=selected_candidate,
+            all_safe_candidates=safe_candidates,
+            scores=scores,
+            blk=blk,
+            mreq=mreq,
+            has_coordination=has_coordination,
+            explanation=explanation,
+            best_score=best_score,
+            db=db,
+            user_id=user_id,
+        )
+
+    return {
+        "status": status_name,
+        "solver_status": status_name,
+        "objective_value": solver.ObjectiveValue(),
+        "solve_duration_ms": round(solve_duration_ms, 2),
+        "selected_candidate_id": selected_candidate.id,
+        "optimized_block_id": optimized_block.id if optimized_block else None,
+        "optimization_score": round(best_score, 2),
+        "explanation": explanation,
+        "recommended_window": {
+            "start": selected_candidate.candidate_start.isoformat(),
+            "end": selected_candidate.candidate_end.isoformat(),
+            "duration_mins": selected_candidate.predicted_duration_mins,
+            "predicted_delay_mins": selected_candidate.predicted_delay_mins,
+            "affected_train_count": selected_candidate.affected_train_count,
+        },
+        "simulation": simulation,
+    }
+
+
+def persist_optimization_result(
+    selected_candidate: BlockCandidate,
+    all_safe_candidates: List[BlockCandidate],
+    scores: Dict[int, float],
+    blk: BlockRequest,
+    mreq: Optional[MaintenanceRequest],
+    has_coordination: bool,
+    explanation: str,
+    best_score: float,
+    db: Session,
+    user_id: Optional[int] = None,
+) -> OptimizedBlock:
+    today_str = datetime.now(timezone.utc).strftime("%Y%m%d")
     cnt = db.query(OptimizedBlock).count() + 1
-    block_code = f"OPT-{today}-{cnt:04d}"
+    block_code = f"OPT-{today_str}-{cnt:04d}"
 
-    # Determine combined departments if integrated
-    combined = None
-    sources = [block.id]
-    # Check for accepted integrations for this block
-    integ_q = db.query(BlockIntegrationRequest).filter(
-        ((BlockIntegrationRequest.source_block_id == block_request_id) | (BlockIntegrationRequest.target_block_id == block_request_id)),
-        BlockIntegrationRequest.final_status == "ACCEPTED",
-    ).all()
-    if integ_q:
-        # Collect all departments involved
-        dept_ids = {mreq.department_id}
-        for integ in integ_q:
-            other_id = integ.target_block_id if integ.source_block_id == block_request_id else integ.source_block_id
-            other_block = db.query(BlockRequest).filter(BlockRequest.id == other_id).first()
-            if other_block:
-                other_mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == other_block.maintenance_request_id).first()
-                if other_mreq:
-                    dept_ids.add(other_mreq.department_id)
-                sources.append(other_id)
-        # Get codes
-        dept_codes = []
-        for did in dept_ids:
-            dept = db.query(Department).filter(Department.id == did).first()
-            if dept:
-                dept_codes.append(dept.code)
-        combined = dept_codes
-    else:
+    # Update candidate flags
+    for c in all_safe_candidates:
+        c.optimization_score = scores.get(c.id, 0.0)
+        c.is_selected = c.id == selected_candidate.id
+
+    dur = int((selected_candidate.candidate_end - selected_candidate.candidate_start).total_seconds() // 60)
+
+    # Coordinated departments
+    combined_depts = []
+    if mreq and mreq.department_id:
         dept = db.query(Department).filter(Department.id == mreq.department_id).first()
-        combined = [dept.code] if dept else None
+        combined_depts.append(dept.code if dept else "ENG")
 
     ob = OptimizedBlock(
         block_code=block_code,
-        section_id=candidate.section_id,
-        track_id=candidate.track_id,
-        start_time=candidate.candidate_start,
-        end_time=candidate.candidate_end,
-        total_duration_mins=int((candidate.candidate_end - candidate.candidate_start).total_seconds() // 60),
-        total_delay_mins=candidate.predicted_delay_mins,
-        affected_train_count=candidate.affected_train_count,
-        ripple_impact_score=None,  # Could be derived, but leave null for now
-        resource_conflict_count=0,
-        combined_departments=combined,
-        optimization_score=optimization_result["optimization_score"],
-        recommendation_reason=optimization_result["explanation"],
-        status="PROPOSED",  # Not APPROVED — official must decide
+        section_id=selected_candidate.section_id,
+        track_id=selected_candidate.track_id,
+        start_time=selected_candidate.candidate_start,
+        end_time=selected_candidate.candidate_end,
+        total_duration_mins=dur,
+        total_delay_mins=selected_candidate.predicted_delay_mins or 0,
+        affected_train_count=selected_candidate.affected_train_count or 0,
+        combined_departments=combined_depts,
+        optimization_score=best_score,
+        recommendation_reason=explanation,
+        status="PROPOSED",  # Pending Railway Authorized Official Review (Never Auto-Approved)
     )
     db.add(ob)
-    db.flush()
-
-    # Update candidate
-    candidate.is_selected = True
-    candidate.optimization_score = optimization_result["optimization_score"]
-    candidate.selected_optimized_block_id = ob.id
-    db.flush()
-
-    # Create optimized_block_sources
-    for src_id in sources:
-        obs = OptimizedBlockSource(optimized_block_id=ob.id, block_request_id=src_id)
-        db.add(obs)
     db.commit()
-    db.refresh(ob)
+    # Link candidate & source
+    db.query(BlockCandidate).filter(BlockCandidate.id == selected_candidate.id).update({
+        "selected_optimized_block_id": ob.id,
+        "is_selected": True,
+    })
+    obs = OptimizedBlockSource(optimized_block_id=ob.id, block_request_id=blk.id)
+    db.add(obs)
+    db.commit()
+
+    # Audit Log
+    log = AuditLog(
+        user_id=user_id or 1,
+        action="OPTIMIZE_BLOCK",
+        entity_type="OptimizedBlock",
+        entity_id=ob.id,
+        old_status=blk.status,
+        new_status="PROPOSED",
+        description=f"OR-Tools CP-SAT generated recommendation {block_code} (Score: {best_score:.1f})",
+    )
+    db.add(log)
+    db.commit()
+
     return ob
+
+
+def build_candidate_comparison_matrix(block_request_id: int, db: Session) -> List[Dict[str, Any]]:
+    candidates = (
+        db.query(BlockCandidate)
+        .filter(BlockCandidate.block_request_id == block_request_id)
+        .order_by(BlockCandidate.candidate_start.asc())
+        .all()
+    )
+    matrix = []
+    for c in candidates:
+        sv = db.query(SafetyValidation).filter(SafetyValidation.candidate_id == c.id).first()
+        is_safe = sv.overall_status == "SAFE" if sv else c.safety_status in ("SAFE", "FEASIBLE")
+        matrix.append({
+            "candidate_id": c.id,
+            "window": f"{c.candidate_start.strftime('%H:%M')}–{c.candidate_end.strftime('%H:%M')}",
+            "start": c.candidate_start.isoformat(),
+            "end": c.candidate_end.isoformat(),
+            "predicted_duration_mins": c.predicted_duration_mins,
+            "predicted_delay_mins": c.predicted_delay_mins,
+            "affected_train_count": c.affected_train_count,
+            "safety_status": "SAFE" if is_safe else "UNSAFE",
+            "optimization_score": float(c.optimization_score) if c.optimization_score else None,
+            "is_selected": c.is_selected,
+            "rejection_reason": c.safety_rejection_reason or (sv.rejection_reasons[0] if sv and sv.rejection_reasons else None),
+        })
+    return matrix

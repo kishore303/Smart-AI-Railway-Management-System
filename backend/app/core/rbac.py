@@ -11,12 +11,12 @@ from app.models.department import Department
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
-# Canonical department-role mappings per SIH26027 spec
+# Canonical department-role mappings per SIH26027 spec (13 combinations)
 # code -> allowed roles
 DEPARTMENT_ROLES = {
-    "ENG": {"MAINTENANCE_STAFF", "ENGINEER_REVIEWER"},
-    "ELEC": {"MAINTENANCE_STAFF", "ENGINEER_REVIEWER"},
-    "SNT": {"MAINTENANCE_STAFF", "ENGINEER_REVIEWER"},
+    "ENG": {"MAINTENANCE_STAFF", "JUNIOR_ENGINEER", "SENIOR_SECTION_ENGINEER"},
+    "ELEC": {"MAINTENANCE_STAFF", "JUNIOR_ENGINEER", "SENIOR_SECTION_ENGINEER"},
+    "SNT": {"MAINTENANCE_STAFF", "JUNIOR_ENGINEER", "SENIOR_SECTION_ENGINEER"},
     "OPS": {"OPERATOR"},
     "CONTROL": {"CONTROLLER"},
     "RAILWAY": {"AUTHORIZED_OFFICIAL"},
@@ -30,23 +30,45 @@ ROLE_PERMISSIONS = {
         "maintenance:read:own",
         "maintenance:read:department",
         "block:read",
+        "asset:read",
+        "notification:read",
     },
-    "ENGINEER_REVIEWER": {
-        "maintenance:review",
+    "JUNIOR_ENGINEER": {
+        "maintenance:review:initial",
         "maintenance:read:department",
         "block:read",
+        "asset:read",
+        "coordination:read",
+        "notification:read",
+    },
+    "SENIOR_SECTION_ENGINEER": {
+        "maintenance:review:senior",
+        "maintenance:read:department",
+        "maintenance:forward:planning",
+        "block:read",
+        "block:create",
         "integration:respond",
+        "coordination:manage",
+        "resources:read",
+        "notification:read",
     },
     "OPERATOR": {
-        "block:read",
         "train:read",
+        "timetable:read",
+        "conflict:read",
+        "train_impact:read",
+        "block:read",
         "maintenance:read",
+        "notification:read",
     },
     "CONTROLLER": {
-        "block:read",
+        "block:read:all",
         "block:coordinate",
+        "execution:manage",
         "train:read",
         "incident:read",
+        "coordination:read",
+        "notification:read",
     },
     "AUTHORIZED_OFFICIAL": {
         "block:approve",
@@ -54,14 +76,22 @@ ROLE_PERMISSIONS = {
         "block:reject",
         "block:read:all",
         "maintenance:read:all",
+        "ai_recommendations:read",
+        "safety_results:read",
         "audit:read",
         "integration:read:all",
+        "simulation:manage",
+        "digital_twin:read",
+        "emergency:read:all",
+        "notification:read",
     },
     "EMERGENCY_OPERATOR": {
         "incident:create",
         "incident:read:all",
         "emergency:respond",
+        "emergency:replanning",
         "block:read:all",
+        "notification:read",
     },
 }
 
@@ -140,10 +170,12 @@ def can_access_department_resource(current_user: User, resource_department_id: i
     return current_user.department_id == resource_department_id
 
 
-def check_self_approval(current_user_id: int, requested_by_id: int):
+def check_self_approval(current_user_id: int, requested_by_id: int, reviewer_id: int = None):
     """Mandatory server-side self-approval protection."""
     if current_user_id == requested_by_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Self-approval prohibited: requester cannot approve own work")
+    if reviewer_id is not None and current_user_id == reviewer_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Self-approval prohibited: reviewer cannot perform final approval")
 
 
 def is_valid_department_role(dept_code: str, role: str) -> bool:

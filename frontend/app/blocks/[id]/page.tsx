@@ -32,9 +32,12 @@ function DetailContent({ blockId }: { blockId: string }) {
   const [windowDays, setWindowDays] = useState(7);
   const [maxCand, setMaxCand] = useState(5);
   const [buffer, setBuffer] = useState(30);
+  const [intervalMins, setIntervalMins] = useState(30);
   const [genLoading, setGenLoading] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
   const [genMsg, setGenMsg] = useState<string | null>(null);
+  const [safeCount, setSafeCount] = useState<number | null>(null);
+  const [unsafeCount, setUnsafeCount] = useState<number | null>(null);
 
   const loadCandidates = useCallback(async () => {
     const c = await api.get<Candidate[]>(`/api/blocks/requests/${blockId}/candidates`);
@@ -70,9 +73,12 @@ function DetailContent({ blockId }: { blockId: string }) {
         candidate_window_days: windowDays,
         max_candidates: maxCand,
         min_duration_buffer_mins: buffer,
+        interval_minutes: intervalMins,
       });
       setGenMsg(res.message);
       setCandidates(res.candidates);
+      if (res.safe_count !== undefined) setSafeCount(res.safe_count);
+      if (res.unsafe_count !== undefined) setUnsafeCount(res.unsafe_count);
     } catch (err) {
       setGenError(err instanceof ApiError ? err.message : "Unable to connect to the railway service. Please try again.");
     } finally {
@@ -132,9 +138,12 @@ function DetailContent({ blockId }: { blockId: string }) {
             {block.block_code}{" "}
             <span className={blockStatusBadge(block.status)}>{block.status}</span>
           </h2>
-          <p className="gov-sub">Block request details and candidate window generation.</p>
+          <p className="gov-sub">Block request details and candidate window generation with deterministic Safety Engine validation.</p>
         </div>
-        <Link className="gov-btn gov-btn-secondary" href="/blocks">Back to List</Link>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <Link className="gov-btn gov-btn-secondary" href="/blocks">Back to List</Link>
+          <Link className="gov-btn gov-btn-primary" href="/safety">Safety Engine</Link>
+        </div>
       </div>
 
       <div className="gov-card">
@@ -147,7 +156,7 @@ function DetailContent({ blockId }: { blockId: string }) {
           <div className="gov-kv-label">Section</div>
           <div className="gov-kv-value">{block.section_id}</div>
           <div className="gov-kv-label">Track</div>
-          <div className="gov-kv-value">{block.track_id ?? "—"}</div>
+          <div className="gov-kv-value">{block.track_id ?? "— (Corridor / All Tracks)"}</div>
           <div className="gov-kv-label">Requested Start</div>
           <div className="gov-kv-value">{block.requested_start ? new Date(block.requested_start).toLocaleString() : "—"}</div>
           <div className="gov-kv-label">Requested End</div>
@@ -177,15 +186,32 @@ function DetailContent({ blockId }: { blockId: string }) {
               <label className="gov-label" htmlFor="cw-buf">Min Buffer (mins, ≥0)</label>
               <input id="cw-buf" className="gov-input" type="number" min={0} value={buffer} onChange={(e) => setBuffer(Number(e.target.value))} required />
             </div>
+            <div>
+              <label className="gov-label" htmlFor="cw-interval">Granularity / Interval</label>
+              <select id="cw-interval" className="gov-input" value={intervalMins} onChange={(e) => setIntervalMins(Number(e.target.value))}>
+                <option value={15}>15 Minutes</option>
+                <option value={30}>30 Minutes</option>
+                <option value={60}>60 Minutes (1 Hour)</option>
+              </select>
+            </div>
           </div>
           <div className="gov-form-actions">
             <button className="gov-btn" type="submit" disabled={genLoading}>
-              {genLoading ? "Generating…" : "Generate Candidates"}
+              {genLoading ? "Generating & Validating…" : "Generate & Validate Candidates"}
             </button>
           </div>
         </form>
         {genError ? <div className="gov-alert gov-alert-error" role="alert">{genError}</div> : null}
-        {genMsg ? <div className="gov-alert gov-alert-success" role="status">{genMsg}</div> : null}
+        {genMsg ? (
+          <div className="gov-alert gov-alert-success" role="status">
+            {genMsg}
+            {safeCount !== null && unsafeCount !== null ? (
+              <div style={{ marginTop: "4px", fontSize: "0.9rem" }}>
+                <strong>Safety Engine Summary:</strong> {safeCount} Safe candidates (eligible for Phase 7 optimization), {unsafeCount} Unsafe candidate(s) filtered.
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <div className="gov-card">
@@ -222,14 +248,22 @@ function DetailContent({ blockId }: { blockId: string }) {
                     <td>{c.asset_risk_score ?? "—"}</td>
                     <td><span className={`gov-badge gov-badge-${planningBadgeKind(c.safety_status)}`}>{c.safety_status}</span></td>
                     <td>
-                      <button
-                        type="button"
-                        className="gov-btn gov-btn-primary gov-btn-sm"
-                        style={{ color: "#ffffff", backgroundColor: "var(--navy)", borderColor: "var(--navy-dark)" }}
-                        onClick={() => void onSelectCandidate(c.id)}
-                      >
-                        View
-                      </button>
+                      <div style={{ display: "flex", gap: "6px" }}>
+                        <button
+                          type="button"
+                          className="gov-btn gov-btn-primary gov-btn-sm"
+                          style={{ color: "#ffffff", backgroundColor: "var(--navy)", borderColor: "var(--navy-dark)" }}
+                          onClick={() => void onSelectCandidate(c.id)}
+                        >
+                          View
+                        </button>
+                        <Link
+                          className="gov-btn gov-btn-secondary gov-btn-sm"
+                          href={`/safety/${c.id}`}
+                        >
+                          Safety Rules
+                        </Link>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -239,29 +273,36 @@ function DetailContent({ blockId }: { blockId: string }) {
         )}
         {selected ? (
           <div style={{ marginTop: 16, borderTop: "1px solid var(--border-light)", paddingTop: 16 }}>
-            <div className="gov-section-header">
+            <div className="gov-page-header">
               <h4 className="gov-section-title">Candidate #{selected.id}</h4>
+              <Link className="gov-btn gov-btn-primary gov-btn-sm" href={`/safety/${selected.id}`}>
+                Inspect 11 Safety Engine Checks →
+              </Link>
             </div>
             <div className="gov-kv-grid">
               <div className="gov-kv-label">Window</div>
               <div className="gov-kv-value">{selected.candidate_start ? new Date(selected.candidate_start).toLocaleString() : "—"} → {selected.candidate_end ? new Date(selected.candidate_end).toLocaleString() : "—"}</div>
               <div className="gov-kv-label">Predicted Duration</div>
-              <div className="gov-kv-value">{selected.predicted_duration_mins ?? "—"}</div>
+              <div className="gov-kv-value">{selected.predicted_duration_mins ?? "—"} mins</div>
               <div className="gov-kv-label">Predicted Delay</div>
-              <div className="gov-kv-value">{selected.predicted_delay_mins ?? "—"}</div>
+              <div className="gov-kv-value">{selected.predicted_delay_mins ?? "—"} mins</div>
               <div className="gov-kv-label">Asset Risk</div>
               <div className="gov-kv-value">{selected.asset_risk_score ?? "—"}</div>
-              <div className="gov-kv-label">Planning Status</div>
-              <div className="gov-kv-value">{selected.safety_status}</div>
-              <div className="gov-kv-label">Planning Reason</div>
-              <div className="gov-kv-value">{selected.safety_rejection_reason ?? "—"}</div>
+              <div className="gov-kv-label">Safety Status</div>
+              <div className="gov-kv-value">
+                <span className={`gov-badge gov-badge-${planningBadgeKind(selected.safety_status)}`}>
+                  {selected.safety_status}
+                </span>
+              </div>
+              <div className="gov-kv-label">Safety Reason / Notes</div>
+              <div className="gov-kv-value">{selected.safety_rejection_reason ?? "Deterministic safety validation passed"}</div>
               <div className="gov-kv-label">Optimization Score</div>
-              <div className="gov-kv-value">{selected.optimization_score ?? "Pending OR-Tools module"}</div>
-              <div className="gov-kv-label">Selected</div>
-              <div className="gov-kv-value">{selected.is_selected ? "Yes" : "No"}</div>
+              <div className="gov-kv-value">{selected.optimization_score ?? "Pending OR-Tools optimization (Phase 7)"}</div>
+              <div className="gov-kv-label">Ready for Optimizer</div>
+              <div className="gov-kv-value">{selected.safety_status === "SAFE" ? "YES — Passed all 11 safety rules" : "NO — Infeasible window"}</div>
             </div>
             <div className="gov-info-box">
-              Planning-level status only — Safety Engine validation and OR-Tools optimization still required before approval.
+              Strict Architecture: AI Predicts → Rules Validate (Safety Engine) → OR-Tools Optimizes (Phase 7) → Official Decides (Phase 8).
             </div>
           </div>
         ) : null}

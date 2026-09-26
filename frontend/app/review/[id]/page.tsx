@@ -89,13 +89,10 @@ function DetailContent() {
   }, [load]);
 
   const isOwnRequest = !!user && !!data && user.id === data.requested_by;
-  const isReviewer = user?.role === "ENGINEER_REVIEWER";
+  const isReviewer = user?.role === "JUNIOR_ENGINEER" || user?.role === "SENIOR_SECTION_ENGINEER";
   const canAct = isReviewer && !isOwnRequest && data?.status === "UNDER_REVIEW";
-  // Backend contract (maintenance.py): ALLOWED_TRANSITIONS["SUBMITTED"] =
-  // {"UNDER_REVIEW"} with STATUS_ROLE_MAP["UNDER_REVIEW"] =
-  // {"ENGINEER_REVIEWER"}. The reviewer takes ownership via the same
-  // transition endpoint; the backend still enforces role, same-department
-  // and no-self-review rules.
+  // The reviewer takes ownership via the transition endpoint; the backend still enforces role,
+  // same-department and no-self-review rules.
   const canStartReview = isReviewer && !isOwnRequest && data?.status === "SUBMITTED";
 
   async function onStartReview() {
@@ -245,7 +242,7 @@ function DetailContent() {
 
             {!isReviewer ? (
               <div className="gov-alert gov-alert-error" role="alert">
-                Only users with the ENGINEER_REVIEWER role can perform review actions.
+                Only users with Junior Engineer (JE) or Senior Section Engineer (SSE) role can perform review actions.
               </div>
             ) : null}
 
@@ -321,17 +318,17 @@ function DetailContent() {
               <h3 className="gov-section-title">Review History &amp; Audit Timeline</h3>
             </div>
 
-            {!history ? (
+            {!history || !Array.isArray(history) ? (
               <div className="gov-info-box">History is unavailable for this request.</div>
             ) : null}
 
-            {history && history.length === 0 ? (
+            {Array.isArray(history) && history.length === 0 ? (
               <div className="gov-empty">
                 <p className="gov-muted">No history entries recorded.</p>
               </div>
             ) : null}
 
-            {history && history.length > 0 ? (
+            {Array.isArray(history) && history.length > 0 ? (
               <div className="gov-table-wrap">
                 <table className="gov-table">
                   <thead>

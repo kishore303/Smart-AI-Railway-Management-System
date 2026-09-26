@@ -8,16 +8,21 @@ import { api, ApiError } from "@/lib/api-client";
 import type {
   AssetRiskResult,
   DurationResult,
+  DurationFeatures,
   ModelRegistryEntry,
   PredictionRecord,
   TrainImpactFeatures,
   TrainImpactResult,
+  UnifiedPredictionResult,
+  TrainImpactAssessment,
+  PredictionHistoryResponse,
 } from "@/types/ml";
 import {
   ASSET_RISK_CATEGORICAL,
   ASSET_RISK_NUMERIC_DEFAULTS,
   ASSET_RISK_NUMERIC_FIELDS,
   TRAIN_IMPACT_DEFAULTS,
+  DURATION_DEFAULTS,
 } from "@/types/ml";
 
 type Tab = "train" | "asset" | "duration" | "history";
@@ -53,7 +58,7 @@ function MlContent() {
 
       <div className="gov-page-header">
         <div>
-          <h2 className="gov-title">ML Predictions — Decision Support Only</h2>
+          <h2 className="gov-title">ML Predictions ΓÇö Decision Support Only</h2>
           <p className="gov-sub">
             AI/ML predictions support planning decisions. A prediction is never an approval, safety clearance, or authorization to execute.
           </p>
@@ -122,7 +127,7 @@ function MlContent() {
 function RequestIdInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
     <div>
-      <label className="gov-label" htmlFor="ml-req">Maintenance Request ID (optional — links &amp; persists prediction)</label>
+      <label className="gov-label" htmlFor="ml-req">Maintenance Request ID (optional ΓÇö links &amp; persists prediction)</label>
       <input id="ml-req" className="gov-input" inputMode="numeric" value={value} onChange={(e) => onChange(e.target.value)} placeholder="e.g. 12" />
     </div>
   );
@@ -194,7 +199,7 @@ function TrainForm() {
           </div>
           {(["pct_right_time", "pct_slight_delay", "pct_significant_delay", "pct_cancelled_unknown"] as const).map((k) => (
             <div key={k}>
-              <label className="gov-label" htmlFor={`ti-${k}`}>{k} (0–100) <span className="gov-required">*</span></label>
+              <label className="gov-label" htmlFor={`ti-${k}`}>{k} (0ΓÇô100) <span className="gov-required">*</span></label>
               <input
                 id={`ti-${k}`}
                 className="gov-input"
@@ -213,7 +218,7 @@ function TrainForm() {
         <RequestIdInput value={reqId} onChange={setReqId} />
         {error ? <div className="gov-alert gov-alert-error" role="alert">{error}</div> : null}
         <div className="gov-form-actions">
-          <button className="gov-btn" type="submit" disabled={loading}>{loading ? "Predicting…" : "Run Train Impact Prediction"}</button>
+          <button className="gov-btn" type="submit" disabled={loading}>{loading ? "PredictingΓÇª" : "Run Train Impact Prediction"}</button>
         </div>
       </form>
       {res ? (
@@ -305,7 +310,7 @@ function AssetForm() {
         <RequestIdInput value={reqId} onChange={setReqId} />
         {error ? <div className="gov-alert gov-alert-error" role="alert">{error}</div> : null}
         <div className="gov-form-actions">
-          <button className="gov-btn" type="submit" disabled={loading}>{loading ? "Predicting…" : "Run Asset Risk Prediction"}</button>
+          <button className="gov-btn" type="submit" disabled={loading}>{loading ? "PredictingΓÇª" : "Run Asset Risk Prediction"}</button>
         </div>
       </form>
       {res ? (
@@ -387,24 +392,24 @@ function DurationForm() {
             </select>
           </div>
           <div>
-            <label className="gov-label" htmlFor="md-workers">Workers (1–100) <span className="gov-required">*</span></label>
+            <label className="gov-label" htmlFor="md-workers">Workers (1ΓÇô100) <span className="gov-required">*</span></label>
             <input id="md-workers" className="gov-input" type="number" min={1} max={100} value={workers} onChange={(e) => setWorkers(Number(e.target.value))} required />
           </div>
           <div>
-            <label className="gov-label" htmlFor="md-eq">Equipment Count (0–50) <span className="gov-required">*</span></label>
+            <label className="gov-label" htmlFor="md-eq">Equipment Count (0ΓÇô50) <span className="gov-required">*</span></label>
             <input id="md-eq" className="gov-input" type="number" min={0} max={50} value={equipment} onChange={(e) => setEquipment(Number(e.target.value))} required />
           </div>
         </div>
         <RequestIdInput value={reqId} onChange={setReqId} />
         {error ? <div className="gov-alert gov-alert-error" role="alert">{error}</div> : null}
         <div className="gov-form-actions">
-          <button className="gov-btn" type="submit" disabled={loading}>{loading ? "Predicting…" : "Run Duration Prediction"}</button>
+          <button className="gov-btn" type="submit" disabled={loading}>{loading ? "PredictingΓÇª" : "Run Duration Prediction"}</button>
         </div>
       </form>
       {res ? (
         <ResultBox title="Duration Prediction Result" variant="warning">
           <div className="gov-alert gov-alert-warning" role="status" style={{ marginBottom: 12 }}>
-            <strong>Demo/Synthetic Output</strong> — This result is produced by a non-production adapter and is for demonstration purposes only.
+            <strong>Demo/Synthetic Output</strong> ΓÇö This result is produced by a non-production adapter and is for demonstration purposes only.
           </div>
           <div className="gov-kv-grid">
             <div className="gov-kv-label">Predicted Duration (mins)</div>
@@ -414,8 +419,8 @@ function DurationForm() {
             <div className="gov-kv-label">Artifact</div>
             <div className="gov-kv-value" style={{ fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{res.artifact_filename}</div>
           </div>
-          {res.demo_label ? (
-            <div className="gov-alert gov-alert-warning" role="status">{res.demo_label}</div>
+          {res.is_demo ? (
+            <div className="gov-alert gov-alert-warning" role="status">Demo/Synthetic Model - Not for Production Use</div>
           ) : null}
           {res.disclaimer ? <div className="gov-info-box">{res.disclaimer}</div> : null}
         </ResultBox>
@@ -436,12 +441,12 @@ function HistoryView() {
     const v = reqId.trim();
     if (v === "") return;
     // Backend contract: GET /api/ml/predictions/{request_id} takes the
-    // numeric MaintenanceRequest.id only. Request codes (REQ-…) are not
+    // numeric MaintenanceRequest.id only. Request codes (REQ-ΓÇª) are not
     // valid path values (FastAPI rejects non-int with 422), so catch that
     // here with a specific message instead of firing a doomed request.
     if (!/^\d+$/.test(v)) {
       setRows(null);
-      setError("Enter the numeric maintenance request ID (for example 1289) — request codes such as REQ-… are not accepted by this lookup. The numeric ID appears in the request details page URL.");
+      setError("Enter the numeric maintenance request ID (for example 1289) ΓÇö request codes such as REQ-ΓÇª are not accepted by this lookup. The numeric ID appears in the request details page URL.");
       return;
     }
     setError(null);
@@ -467,10 +472,10 @@ function HistoryView() {
           <div style={{ flex: 1, minWidth: 200 }}>
             <label className="gov-label" htmlFor="hist-req">Maintenance Request ID <span className="gov-required">*</span></label>
             <input id="hist-req" className="gov-input" inputMode="numeric" value={reqId} onChange={(e) => setReqId(e.target.value)} required />
-            <span className="gov-hint">Numeric database ID only (e.g. 1289) — see the ID in the request details page URL. Request codes are not accepted here.</span>
+            <span className="gov-hint">Numeric database ID only (e.g. 1289) ΓÇö see the ID in the request details page URL. Request codes are not accepted here.</span>
           </div>
           <button className="gov-btn gov-btn-sm" type="submit" disabled={loading}>
-            {loading ? "Loading…" : "Load History"}
+            {loading ? "LoadingΓÇª" : "Load History"}
           </button>
         </div>
       </form>
@@ -497,11 +502,11 @@ function HistoryView() {
               {rows.map((r) => (
                 <tr key={r.id}>
                   <td>{r.id}</td>
-                  <td>{r.model_version ?? "—"}</td>
-                  <td>{r.predicted_delay_mins ?? "—"}</td>
-                  <td>{r.predicted_duration_mins ?? "—"}</td>
-                  <td>{r.asset_risk_score ?? r.risk_level ?? "—"}</td>
-                  <td>{r.predicted_at ? new Date(r.predicted_at).toLocaleString() : "—"}</td>
+                  <td>{r.model_version ?? "ΓÇö"}</td>
+                  <td>{r.predicted_delay_mins ?? "ΓÇö"}</td>
+                  <td>{r.predicted_duration_mins ?? "ΓÇö"}</td>
+                  <td>{r.asset_risk_score ?? r.risk_level ?? "ΓÇö"}</td>
+                  <td>{r.predicted_at ? new Date(r.predicted_at).toLocaleString() : "ΓÇö"}</td>
                 </tr>
               ))}
             </tbody>

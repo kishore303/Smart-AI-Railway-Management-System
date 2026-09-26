@@ -59,7 +59,7 @@ class MaintenancePrediction(Base):
     train_impact_score = Column(Numeric(6, 3), nullable=True)
     predicted_delay_mins = Column(Integer, nullable=True)
     affected_train_count = Column(Integer, nullable=True)
-    model_version = Column(String(50), nullable=True)
+    model_version = Column(String(255), nullable=True)
     input_features = Column(JSONB, nullable=True)
     predicted_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -80,3 +80,21 @@ class MlModelRegistry(Base):
     activated_at = Column(DateTime(timezone=True), nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class MaintenanceArea(Base):
+    __tablename__ = "maintenance_areas"
+    __table_args__ = (
+        CheckConstraint("end_km > start_km", name="maintenance_areas_km_range_check"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    maintenance_request_id = Column(BigInteger, ForeignKey("maintenance_requests.id", ondelete="CASCADE"), nullable=False, unique=True)
+    section_id = Column(BigInteger, ForeignKey("railway_sections.id"), nullable=False)
+    track_id = Column(BigInteger, ForeignKey("tracks.id"), nullable=False)
+    start_km = Column(Numeric(10, 3), nullable=False)
+    end_km = Column(Numeric(10, 3), nullable=False)
+    length_km = Column(Numeric(10, 3), nullable=False)
+    defined_by = Column(BigInteger, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())

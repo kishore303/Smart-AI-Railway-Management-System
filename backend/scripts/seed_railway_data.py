@@ -80,6 +80,9 @@ try:
     a1 = get_or_create_asset("SYN-AST-001", "SYN Track Asset 001", "Track", "ENG", sec1.id, t1.id)
     a2 = get_or_create_asset("SYN-AST-002", "SYN OHE Asset 002", "OHE", "ELEC", sec1.id, t1.id)
     a3 = get_or_create_asset("SYN-AST-003", "SYN Signal Asset 003", "Signal", "SNT", sec1.id, t1.id)
+    a4 = get_or_create_asset("SYN-AST-004", "SYN Track Asset 004", "Track", "ENG", sec1.id, t2.id)
+    a5 = get_or_create_asset("SYN-AST-005", "SYN Signal Asset 005", "Signal", "SNT", sec2.id, t3.id)
+    a6 = get_or_create_asset("SYN-AST-006", "SYN OHE Asset 006", "OHE", "ELEC", sec2.id, t3.id)
     r1 = get_or_create_resource("SYN-RES-001", "SYN Track Machine", "ENG", "Track machine")
     r2 = get_or_create_resource("SYN-RES-002", "SYN OHE Staff Crew", "ELEC", "Worker")
     # Additional asset for ELEC

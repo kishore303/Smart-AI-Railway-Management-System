@@ -53,7 +53,7 @@ function QueueContent() {
     void load();
   }, [load]);
 
-  const isReviewer = user?.role === "ENGINEER_REVIEWER";
+  const isReviewer = user?.role === "JUNIOR_ENGINEER" || user?.role === "SENIOR_SECTION_ENGINEER";
 
   return (
     <div className="gov-page">
@@ -63,14 +63,14 @@ function QueueContent() {
         <div>
           <h2 className="gov-title">Review Queue</h2>
           <p className="gov-sub">
-            Maintenance requests awaiting verification in your department. Only reviewers can take review actions; the backend remains authoritative.
+            Maintenance requests awaiting technical verification in your department (Junior Engineer &amp; Senior Section Engineer).
           </p>
         </div>
       </div>
 
       {!isReviewer && !loading ? (
         <div className="gov-alert gov-alert-error" role="alert">
-          Only users with the ENGINEER_REVIEWER role can access the review queue.
+          Only users with the Junior Engineer (JE) or Senior Section Engineer (SSE) role can access the review queue.
         </div>
       ) : null}
 
@@ -107,7 +107,7 @@ function QueueContent() {
         <div className="gov-alert gov-alert-error" role="alert">{error}</div>
       ) : null}
 
-      {!loading && !error && data && data.items.length === 0 ? (
+      {!loading && !error && data && (data.items ?? []).length === 0 ? (
         <div className="gov-card">
           <div className="gov-empty">
             <p className="gov-muted">No maintenance requests are currently awaiting review.</p>
@@ -115,11 +115,11 @@ function QueueContent() {
         </div>
       ) : null}
 
-      {!loading && !error && data && data.items.length > 0 ? (
+      {!loading && !error && data && (data.items ?? []).length > 0 ? (
         <div className="gov-card">
           <div className="gov-card-header">
             <h3 className="gov-section-title" style={{ margin: 0 }}>Requests</h3>
-            <span className="gov-muted">Total: {data.total}</span>
+            <span className="gov-muted">Total: {data.total ?? (data.items ?? []).length}</span>
           </div>
           <div className="gov-table-wrap">
             <table className="gov-table">
@@ -134,7 +134,7 @@ function QueueContent() {
                 </tr>
               </thead>
               <tbody>
-                {data.items.map((r) => (
+                {(data.items ?? []).map((r) => (
                   <tr key={r.id}>
                     <td style={{ fontWeight: 600 }}>{r.request_code}</td>
                     <td>{r.maintenance_type}</td>

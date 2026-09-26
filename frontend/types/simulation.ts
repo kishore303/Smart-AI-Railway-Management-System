@@ -83,6 +83,8 @@ export interface SimulationHistoryResponse {
     id: number;
     simulation_name: string | null;
     original_block_id: number | null;
+    predicted_delay_mins?: number | null;
+    optimization_score?: number | null;
     created_at: string | null;
   }[];
   skip: number;

@@ -9,7 +9,7 @@ from app.models.asset import Asset, AssetSensorReading, AssetFailureHistory  # n
 from app.models.weather import WeatherReading  # noqa: F401
 from app.models.resource import Resource  # noqa: F401
 from app.models.train import Train, TrainSchedule  # noqa: F401
-from app.models.maintenance import MaintenanceRequest, MaintenancePrediction, MlModelRegistry  # noqa: F401
+from app.models.maintenance import MaintenanceRequest, MaintenancePrediction, MlModelRegistry, MaintenanceArea  # noqa: F401
 from app.models.safety import SafetyValidation  # noqa: F401
 from app.models.block import (  # noqa: F401
     BlockRequest,
@@ -43,6 +43,7 @@ __all__ = [
     "MaintenanceRequest",
     "MaintenancePrediction",
     "MlModelRegistry",
+    "MaintenanceArea",
     "BlockRequest",
     "BlockIntegrationRequest",
     "OptimizedBlock",

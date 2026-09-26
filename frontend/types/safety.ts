@@ -54,8 +54,10 @@ export interface BlockValidationsResponse {
 
 export const SAFETY_CHECK_ORDER: string[] = [
   "TIMING",
+  "TIMING_DURATION",
   "TRACK_CONFLICT",
   "SECTION_CONFLICT",
+  "EXISTING_BLOCK",
   "TRAIN_CONFLICT",
   "ADJACENT_FOULING",
   "RESOURCE_CONFLICT",
@@ -66,13 +68,14 @@ export const SAFETY_CHECK_ORDER: string[] = [
 ];
 
 export function safetyBadgeKind(status: string | null): "green" | "amber" | "red" | "blue" {
-  if (status === "SAFE") return "green";
-  if (status === "UNSAFE") return "red";
+  if (status === "SAFE" || status === "FEASIBLE") return "green";
+  if (status === "UNSAFE" || status === "INFEASIBLE") return "red";
   return "amber";
 }
 
 export function checkBadgeKind(status: string): "green" | "amber" | "red" | "blue" {
   if (status === "PASS") return "green";
   if (status === "FAIL") return "red";
-  return "amber";
+  if (status === "WARN" || status === "WARNING") return "amber";
+  return "blue";
 }

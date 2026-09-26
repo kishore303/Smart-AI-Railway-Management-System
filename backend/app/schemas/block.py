@@ -63,5 +63,7 @@ class CandidateOut(BaseModel):
 
 class CandidateGenerateResponse(BaseModel):
     generated: int
+    safe_candidates_count: Optional[int] = None
+    unsafe_candidates_count: Optional[int] = None
     candidates: List[CandidateOut]
     message: str

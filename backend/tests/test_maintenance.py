@@ -34,9 +34,9 @@ def future(days=2, hours=0):
 from app.database import SessionLocal
 from app.models.maintenance import MaintenanceRequest
 from app.models.block import BlockRequest, BlockCandidate, BlockIntegrationRequest, OptimizedBlock
-from sqlalchemy import text
 db = SessionLocal()
 db.execute(text("DELETE FROM safety_validations"))
+db.execute(text("DELETE FROM simulations"))
 db.execute(text("DELETE FROM notifications WHERE optimized_block_id IS NOT NULL"))
 db.execute(text("DELETE FROM notifications WHERE integration_request_id IS NOT NULL"))
 db.query(BlockIntegrationRequest).delete()
@@ -48,6 +48,7 @@ db.execute(text("DELETE FROM maintenance_predictions"))
 db.query(MaintenanceRequest).delete()
 db.commit()
 db.close()
+
 
 print("=== 1. Valid creation ===")
 start = future(2)
@@ -250,14 +251,15 @@ print("PASS — maintenance detail no hash")
 
 print("\n=== 13. Regression Modules 1,2,3 ===")
 import subprocess
-res = subprocess.run(["python", "D:\\IRCTC\\backend\\scripts\\verify_models.py"], capture_output=True, text=True)
+res = subprocess.run([sys.executable, str(backend_dir / "scripts" / "verify_models.py")], capture_output=True, text=True)
 assert "ALL MODEL VERIFICATION PASSED" in res.stdout
 print("PASS — Module1 verify_models")
-res = subprocess.run(["python", "D:\\IRCTC\\backend\\tests\\test_auth_rbac.py"], capture_output=True, text=True)
+res = subprocess.run([sys.executable, str(backend_dir / "tests" / "test_auth_rbac.py")], capture_output=True, text=True)
 assert "ALL 11 (+2) CHECKS PASSED" in res.stdout, res.stdout[-800:]
 print("PASS — Module2 auth_rbac")
-res = subprocess.run(["python", "D:\\IRCTC\\backend\\tests\\test_profile.py"], capture_output=True, text=True)
+res = subprocess.run([sys.executable, str(backend_dir / "tests" / "test_profile.py")], capture_output=True, text=True)
 assert "ALL MODULE 3 CHECKS PASSED" in res.stdout, res.stdout[-800:]
 print("PASS — Module3 profile")
+
 
 print("\n========== ALL MODULE 4 CHECKS PASSED ==========")

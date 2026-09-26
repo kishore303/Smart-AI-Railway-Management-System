@@ -273,9 +273,9 @@ with engine.connect() as conn:
 print("\n=== 19. Regression 1-7 (light) ===")
 import subprocess, hashlib
 for cmd, name in [
-    (["python","D:\\IRCTC\\backend\\scripts\\verify_models.py"],"Module1"),
-    (["python","D:\\IRCTC\\backend\\tests\\test_auth_rbac.py"],"Module2"),
-    (["python","D:\\IRCTC\\backend\\tests\\test_profile.py"],"Module3"),
+    ([sys.executable,"D:\\IRCTC\\backend\\scripts\\verify_models.py"],"Module1"),
+    ([sys.executable,"D:\\IRCTC\\backend\\tests\\test_auth_rbac.py"],"Module2"),
+    ([sys.executable,"D:\\IRCTC\\backend\\tests\\test_profile.py"],"Module3"),
 ]:
     res=subprocess.run(cmd, capture_output=True, text=True)
     ok="PASSED" in res.stdout or "ALL" in res.stdout

@@ -60,3 +60,29 @@ export function statusBadgeKind(status: string): "green" | "amber" | "red" | "bl
   if (["DRAFT"].includes(status)) return "blue";
   return "amber";
 }
+
+export interface MaintenanceAreaOut {
+  id: number;
+  maintenance_request_id: number;
+  section_id: number;
+  track_id: number;
+  start_km: number;
+  end_km: number;
+  length_km: number;
+  defined_by: number;
+  defined_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MaintenanceAreaCreate {
+  section_id: number;
+  track_id: number;
+  start_km: number;
+  end_km: number;
+}
+
+export interface MaintenanceAreaUpdate {
+  start_km?: number;
+  end_km?: number;
+}

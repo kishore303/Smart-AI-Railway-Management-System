@@ -87,6 +87,14 @@ class ReviewAction(BaseModel):
     rejection_reason: Optional[str] = Field(None, max_length=1000)
 
 
+class ReasonPayload(BaseModel):
+    reason: str = Field(min_length=3, max_length=1000, description="Mandatory reason for rejection or revision request")
+
+
+class SubmitPayload(BaseModel):
+    notes: Optional[str] = Field(None, max_length=1000, description="Optional submission notes")
+
+
 class ReviewHistoryItem(BaseModel):
     id: int
     action: str
@@ -107,3 +115,33 @@ class ReviewQueueResponse(BaseModel):
     items: List[MaintenanceOut]
     skip: int
     limit: int
+
+
+class MaintenanceAreaCreate(BaseModel):
+    section_id: int
+    track_id: int
+    start_km: float = Field(..., gt=0, description="Start KM must be positive")
+    end_km: float = Field(..., gt=0, description="End KM must be positive")
+
+
+class MaintenanceAreaUpdate(BaseModel):
+    start_km: Optional[float] = Field(None, gt=0, description="Start KM must be positive")
+    end_km: Optional[float] = Field(None, gt=0, description="End KM must be positive")
+
+
+class MaintenanceAreaOut(BaseModel):
+    id: int
+    maintenance_request_id: int
+    section_id: int
+    track_id: int
+    start_km: float
+    end_km: float
+    length_km: float
+    defined_by: int
+    defined_by_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+

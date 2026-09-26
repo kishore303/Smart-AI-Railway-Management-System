@@ -14,10 +14,11 @@ export interface TrainImpactResult {
   train_impact_score: number;
   affected_train_count: number;
   impact_level: string;
+  model_name?: string;
   model_version: string;
-  artifact_filename: string;
-  is_demo: boolean;
-  input_features: Record<string, unknown>;
+  artifact_filename?: string;
+  is_demo?: boolean;
+  input_features?: Record<string, unknown>;
   persisted_id?: number | null;
   disclaimer?: string;
 }
@@ -27,33 +28,110 @@ export type AssetRiskFeatures = Record<string, string | number>;
 export interface AssetRiskResult {
   asset_risk_score: number;
   risk_level: string;
-  predicted_class: number;
+  risk_class?: number;
+  risk_probability?: number;
+  predicted_class?: number;
+  model_name?: string;
   model_version: string;
-  artifact_filename: string;
-  is_demo: boolean;
-  input_features: Record<string, unknown>;
+  artifact_filename?: string;
+  is_demo?: boolean;
+  input_features?: Record<string, unknown>;
   persisted_id?: number | null;
   disclaimer?: string;
 }
 
 export interface DurationFeatures {
   maintenance_type: string;
+  department?: string;
+  asset_type?: string;
+  complexity?: string;
   priority: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
   workers: number;
   equipment_count: number;
+  asset_age_years?: number;
+  condition_score?: number;
+  previous_duration_min?: number;
 }
 
 export interface DurationResult {
+  predicted_duration_minutes: number;
   predicted_duration_mins: number;
+  model_name?: string;
   model_version: string;
-  artifact_filename: string;
+  artifact_filename?: string;
   is_demo: boolean;
-  demo_label?: string;
-  input_features: Record<string, unknown>;
-  dataset_rows?: number | null;
-  dataset_columns?: string[] | null;
+  input_features?: Record<string, unknown>;
   persisted_id?: number | null;
   disclaimer?: string;
+}
+
+export interface AffectedTrainItem {
+  train_number: number;
+  train_name: string;
+  station_code: string;
+  station_name: string;
+  section_id: number;
+  track_id?: number | null;
+  scheduled_entry?: string | null;
+  scheduled_exit?: string | null;
+  predicted_delay_mins: number;
+  impact_level: string;
+  impact_reason?: string | null;
+}
+
+export interface TrainImpactAssessment {
+  affected_train_count: number;
+  total_predicted_delay_minutes: number;
+  average_predicted_delay_minutes: number;
+  maximum_predicted_delay_minutes: number;
+  train_impact_score: number;
+  impact_level: string;
+  individual_predictions: AffectedTrainItem[];
+  model_name: string;
+  model_version: string;
+}
+
+export interface UnifiedPredictionResult {
+  status: string;
+  prediction_id: number;
+  maintenance_request_id: number;
+  is_stale: boolean;
+  is_demo?: boolean;
+  predicted_at: string;
+  duration: {
+    predicted_duration_minutes: number;
+    predicted_duration_mins?: number;
+    confidence_interval_lower_mins?: number;
+    confidence_interval_upper_mins?: number;
+    model_name: string;
+    model_version: string;
+  };
+  duration_prediction?: {
+    predicted_duration_minutes: number;
+    predicted_duration_mins?: number;
+    confidence_interval_lower_mins?: number;
+    confidence_interval_upper_mins?: number;
+    model_name: string;
+    model_version: string;
+  };
+  risk: {
+    risk_class: number;
+    risk_probability: number;
+    asset_risk_score: number;
+    risk_level: string;
+    model_name: string;
+    model_version: string;
+  };
+  risk_prediction?: {
+    risk_class: number;
+    risk_probability: number;
+    asset_risk_score: number;
+    risk_level: string;
+    model_name: string;
+    model_version: string;
+  };
+  train_impact: TrainImpactAssessment;
+  disclaimer: string;
 }
 
 export interface PredictionRecord {
@@ -66,8 +144,16 @@ export interface PredictionRecord {
   predicted_delay_mins: number | null;
   affected_train_count: number | null;
   model_version: string | null;
-  input_features: Record<string, unknown> | null;
+  input_features?: Record<string, unknown> | null;
   predicted_at: string | null;
+}
+
+export interface PredictionHistoryResponse {
+  maintenance_request_id: number;
+  is_stale: boolean;
+  total_predictions: number;
+  latest_prediction?: PredictionRecord | null;
+  history: PredictionRecord[];
 }
 
 export interface ModelRegistryEntry {
@@ -77,21 +163,35 @@ export interface ModelRegistryEntry {
   is_demo: boolean;
   is_active: boolean;
   notes: string | null;
+  features?: string[];
 }
 
 export const TRAIN_IMPACT_DEFAULTS: TrainImpactFeatures = {
-  train_number: 12345,
-  train_name: "Test Express",
-  station_code: "NDLS",
-  station_name: "New Delhi",
-  pct_right_time: 70,
+  train_number: 12601,
+  train_name: "MANGALORE EXP",
+  station_code: "MAS",
+  station_name: "CHENNAI CENTRAL",
+  pct_right_time: 80,
   pct_slight_delay: 15,
-  pct_significant_delay: 10,
-  pct_cancelled_unknown: 5,
+  pct_significant_delay: 4,
+  pct_cancelled_unknown: 1,
+};
+
+export const DURATION_DEFAULTS: DurationFeatures = {
+  maintenance_type: "Track Inspection",
+  department: "Engineering",
+  asset_type: "Track",
+  complexity: "Medium",
+  priority: "MEDIUM",
+  workers: 6,
+  equipment_count: 2,
+  asset_age_years: 7,
+  condition_score: 75.0,
+  previous_duration_min: 120,
 };
 
 export const ASSET_RISK_CATEGORICAL: Record<string, string[]> = {
-  region: ["North", "South", "East", "West", "Central", "North-East"],
+  region: ["Northern", "Southern", "Eastern", "Western", "Central", "North-Eastern"],
   season: ["Summer", "Monsoon", "Winter"],
   train_type: ["Express", "Freight", "Passenger", "Local"],
   ballast_condition: ["Good", "Average", "Poor"],
@@ -99,32 +199,32 @@ export const ASSET_RISK_CATEGORICAL: Record<string, string[]> = {
 };
 
 export const ASSET_RISK_NUMERIC_DEFAULTS: Record<string, number> = {
-  train_age_years: 10,
-  average_speed_kmph: 80,
-  distance_travelled_km: 10000,
-  track_temperature_c: 30,
-  rail_wear_mm: 5,
-  track_vibration_level: 2.5,
-  track_curvature_degree: 3,
-  ambient_temperature_c: 25,
+  train_age_years: 8,
+  average_speed_kmph: 75,
+  distance_travelled_km: 1500,
+  track_temperature_c: 32,
+  rail_wear_mm: 2.5,
+  track_vibration_level: 1.5,
+  track_curvature_degree: 1.2,
+  ambient_temperature_c: 28,
   humidity_percent: 60,
-  rainfall_mm: 10,
-  wind_speed_kmph: 15,
-  wheel_wear_percent: 20,
+  rainfall_mm: 0,
+  wind_speed_kmph: 12,
+  wheel_wear_percent: 25,
   axle_temperature_c: 50,
-  brake_pressure_psi: 90,
-  brake_pad_wear_percent: 30,
-  bearing_temperature_c: 60,
-  battery_voltage: 110,
-  traction_motor_temp_c: 70,
-  power_consumption_kw: 500,
+  brake_pressure_psi: 72,
+  brake_pad_wear_percent: 35,
+  bearing_temperature_c: 55,
+  battery_voltage: 24,
+  traction_motor_temp_c: 60,
+  power_consumption_kw: 320,
   load_factor_percent: 70,
-  daily_trips: 3,
-  delay_minutes: 10,
-  last_maintenance_days: 45,
-  inspection_score: 75,
-  sensor_health_index: 85,
-  risk_score: 0.5,
+  daily_trips: 4,
+  delay_minutes: 5,
+  last_maintenance_days: 20,
+  inspection_score: 85,
+  sensor_health_index: 90,
+  risk_score: 30,
 };
 
 export const ASSET_RISK_NUMERIC_FIELDS: string[] = [

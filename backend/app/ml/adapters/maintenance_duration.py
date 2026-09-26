@@ -63,8 +63,9 @@ class MaintenanceDurationDemoAdapter(BasePredictor):
         priority_mult = {"LOW": 0.8, "MEDIUM": 1.0, "HIGH": 1.2, "CRITICAL": 1.5}[clean["priority"]]
         # Workers reduce time, equipment slight
         workers = int(clean["workers"])
-        # Heuristic: more workers -> less time, diminishing
-        duration = base * priority_mult * (1 - min(workers - 1, 10) * 0.03) + random.uniform(-5, 5)
+        # Deterministic variation
+        variation = (hash(f"{clean['maintenance_type']}_{workers}_{clean['equipment_count']}") % 11) - 5
+        duration = base * priority_mult * (1 - min(workers - 1, 10) * 0.03) + variation
         duration = max(15, int(round(duration)))
         return {
             "predicted_duration_mins": duration,

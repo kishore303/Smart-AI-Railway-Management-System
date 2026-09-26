@@ -35,25 +35,22 @@ tok_ops = tok("ops.operator@irctc.test","OpsOper@123")
 from app.database import SessionLocal as SL2
 from app.models.maintenance import MaintenanceRequest as MR2
 from app.models.block import BlockRequest as BR2, BlockCandidate as BC2, BlockIntegrationRequest as BIR2, OptimizedBlock as OB2
-from sqlalchemy import text as _text2
+from sqlalchemy import text
 db2 = SL2()
-db2.execute(_text2("DELETE FROM safety_validations"))
-db2.execute(_text2("DELETE FROM notifications WHERE optimized_block_id IS NOT NULL"))
-db2.execute(_text2("DELETE FROM notifications WHERE integration_request_id IS NOT NULL"))
+db2.execute(text("DELETE FROM safety_validations"))
+db2.execute(text("DELETE FROM simulations"))
+db2.execute(text("DELETE FROM notifications WHERE optimized_block_id IS NOT NULL"))
+db2.execute(text("DELETE FROM notifications WHERE integration_request_id IS NOT NULL"))
 db2.query(BIR2).delete()
 db2.query(BC2).delete()
-db2.execute(_text2("DELETE FROM optimized_block_sources"))
+db2.execute(text("DELETE FROM optimized_block_sources"))
 db2.query(OB2).delete()
 db2.query(BR2).delete()
-db2.execute(_text2("DELETE FROM maintenance_predictions"))
+db2.execute(text("DELETE FROM maintenance_predictions"))
 db2.query(MR2).delete()
 db2.commit()
 db2.close()
-# Original clean for maintenance
-db=SessionLocal()
-db.query(MaintenanceRequest).delete()
-db.commit()
-db.close()
+
 
 print("=== 1. Valid review workflow (VERIFY) ===")
 r=client.post("/api/maintenance/requests", headers=hdr(tok_eng), json={"asset_id":1,"section_id":1,"track_id":1,"maintenance_type":"Valid Review","priority":"HIGH","requested_start":fut(20),"requested_end":fut2(20,2)})
@@ -224,17 +221,18 @@ with engine.connect() as conn:
 
 print("\n=== 9. Regression 1-4 ===")
 import subprocess
-res=subprocess.run(["python","D:\\IRCTC\\backend\\scripts\\verify_models.py"], capture_output=True, text=True)
+res=subprocess.run([sys.executable, str(backend_dir / "scripts" / "verify_models.py")], capture_output=True, text=True)
 assert "ALL MODEL VERIFICATION PASSED" in res.stdout
 print(" PASS Module1")
-res=subprocess.run(["python","D:\\IRCTC\\backend\\tests\\test_auth_rbac.py"], capture_output=True, text=True)
+res=subprocess.run([sys.executable, str(backend_dir / "tests" / "test_auth_rbac.py")], capture_output=True, text=True)
 assert "ALL 11 (+2) CHECKS PASSED" in res.stdout, res.stdout[-800:]
 print(" PASS Module2")
-res=subprocess.run(["python","D:\\IRCTC\\backend\\tests\\test_profile.py"], capture_output=True, text=True)
+res=subprocess.run([sys.executable, str(backend_dir / "tests" / "test_profile.py")], capture_output=True, text=True)
 assert "ALL MODULE 3 CHECKS PASSED" in res.stdout, res.stdout[-800:]
 print(" PASS Module3")
-res=subprocess.run(["python","D:\\IRCTC\\backend\\tests\\test_maintenance.py"], capture_output=True, text=True)
+res=subprocess.run([sys.executable, str(backend_dir / "tests" / "test_maintenance.py")], capture_output=True, text=True)
 assert "ALL MODULE 4 CHECKS PASSED" in res.stdout, res.stdout[-800:]
 print(" PASS Module4")
 
 print("\n========== ALL MODULE 5 CHECKS PASSED ==========")
+

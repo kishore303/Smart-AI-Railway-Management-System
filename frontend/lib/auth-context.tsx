@@ -75,12 +75,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         department: res.user.department,
         department_id: res.user.department_id,
         is_active: res.user.is_active,
+        permissions: res.user.permissions || [],
       });
     },
     []
   );
 
   const logout = useCallback(() => {
+    try {
+      void api.post("/api/auth/logout", {});
+    } catch {
+      // Best effort API logout
+    }
     persistToken(null);
     setUser(null);
   }, []);

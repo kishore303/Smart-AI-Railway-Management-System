@@ -9,12 +9,12 @@ from app.models.block import BlockCandidate, BlockRequest
 from app.models.maintenance import MaintenanceRequest
 from app.models.safety import SafetyValidation
 from app.models.audit import AuditLog
-from app.safety.engine import validate_candidate
+from app.safety.engine import validate_candidate, revalidate_candidate, get_safe_candidates
 
 router = APIRouter(prefix="/api/safety", tags=["safety"])
 
 # Roles allowed to validate — not MAINTENANCE_STAFF (to prevent bypass)
-ALLOWED_ROLES = {"ENGINEER_REVIEWER", "CONTROLLER", "AUTHORIZED_OFFICIAL", "EMERGENCY_OPERATOR"}
+ALLOWED_ROLES = {"JUNIOR_ENGINEER", "SENIOR_SECTION_ENGINEER", "CONTROLLER", "AUTHORIZED_OFFICIAL", "EMERGENCY_OPERATOR"}
 
 
 def _audit(db: Session, user_id, action, entity_id=None, desc=None):
@@ -33,55 +33,70 @@ def validate_candidate_endpoint(candidate_id: int, current_user: User = Depends(
     block = db.query(BlockRequest).filter(BlockRequest.id == cand.block_request_id).first()
     mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == block.maintenance_request_id).first() if block else None
     if not mreq or not can_access_department_resource(current_user, mreq.department_id, db):
-        # Also allow if user is from candidate's section? But enforce dept
         if current_user.role != "AUTHORIZED_OFFICIAL" and current_user.department_id != (mreq.department_id if mreq else None):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Department access denied")
 
-    result = validate_candidate(cand, db)
-    # Persist — upsert by candidate_id
-    existing = db.query(SafetyValidation).filter(SafetyValidation.candidate_id == candidate_id).first()
-    if existing:
-        existing.overall_status = result["overall_status"]
-        existing.is_safe_for_optimization = result["is_safe_for_optimization"]
-        existing.checks = result["checks"]
-        existing.rejection_reasons = result["rejection_reasons"]
-        existing.warnings = result["warnings"]
-        existing.validated_by = current_user.id
-        existing.validated_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(existing)
-        sv = existing
-    else:
-        sv = SafetyValidation(
-            candidate_id=candidate_id,
-            block_request_id=cand.block_request_id,
-            overall_status=result["overall_status"],
-            is_safe_for_optimization=result["is_safe_for_optimization"],
-            checks=result["checks"],
-            rejection_reasons=result["rejection_reasons"],
-            warnings=result["warnings"],
-            validated_by=current_user.id,
-            validated_at=datetime.now(timezone.utc),
-        )
-        db.add(sv)
-        db.commit()
-        db.refresh(sv)
+    result = validate_candidate(cand, db, user_id=current_user.id, persist=True)
+    sv = db.query(SafetyValidation).filter(SafetyValidation.candidate_id == candidate_id).first()
 
-    _audit(db, current_user.id, "SAFETY_VALIDATION", entity_id=candidate_id, desc=f"{result['overall_status']} checks {len(result['checks'])} fails {len(result['rejection_reasons'])}")
-
-    # Do NOT change candidate.is_selected or optimization_score or block status
     return {
         "candidate_id": candidate_id,
         "block_request_id": cand.block_request_id,
-        "overall_status": sv.overall_status,
-        "is_safe_for_optimization": sv.is_safe_for_optimization,
-        "checks": sv.checks,
-        "rejection_reasons": sv.rejection_reasons,
-        "warnings": sv.warnings,
-        "validated_by": sv.validated_by,
-        "validated_at": sv.validated_at.isoformat(),
+        "overall_status": sv.overall_status if sv else result["overall_status"],
+        "is_safe_for_optimization": sv.is_safe_for_optimization if sv else result["is_safe_for_optimization"],
+        "checks": sv.checks if sv else result["checks"],
+        "rejection_reasons": sv.rejection_reasons if sv else result["rejection_reasons"],
+        "warnings": sv.warnings if sv else result["warnings"],
+        "validated_by": sv.validated_by if sv else current_user.id,
+        "validated_at": sv.validated_at.isoformat() if sv and sv.validated_at else datetime.now(timezone.utc).isoformat(),
         "planning_safety_status": cand.safety_status,
         "disclaimer": "Safety Engine validation only — does not approve block, does not select candidate, OR-Tools pending",
+    }
+
+
+@router.post("/revalidate/candidate/{candidate_id}")
+def revalidate_candidate_endpoint(candidate_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    if current_user.role not in ALLOWED_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role cannot perform safety validation")
+    cand = db.query(BlockCandidate).filter(BlockCandidate.id == candidate_id).first()
+    if not cand:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found")
+    block = db.query(BlockRequest).filter(BlockRequest.id == cand.block_request_id).first()
+    mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == block.maintenance_request_id).first() if block else None
+    if not mreq or not can_access_department_resource(current_user, mreq.department_id, db):
+        if current_user.role != "AUTHORIZED_OFFICIAL" and current_user.department_id != (mreq.department_id if mreq else None):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Department access denied")
+
+    result = revalidate_candidate(candidate_id, db, user_id=current_user.id)
+    return {
+        "candidate_id": candidate_id,
+        "block_request_id": cand.block_request_id,
+        "overall_status": result["overall_status"],
+        "is_safe_for_optimization": result["is_safe_for_optimization"],
+        "checks": result["checks"],
+        "rejection_reasons": result["rejection_reasons"],
+        "warnings": result["warnings"],
+        "validated_by": current_user.id,
+        "planning_safety_status": cand.safety_status,
+        "message": "Candidate revalidated against live operational state",
+    }
+
+
+@router.get("/safe-candidates/{block_request_id}")
+def get_safe_candidates_endpoint(block_request_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    block = db.query(BlockRequest).filter(BlockRequest.id == block_request_id).first()
+    if not block:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Block request not found")
+    mreq = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == block.maintenance_request_id).first() if block else None
+    if not mreq or not can_access_department_resource(current_user, mreq.department_id, db):
+        if current_user.role not in ("AUTHORIZED_OFFICIAL", "CONTROLLER") and current_user.department_id != (mreq.department_id if mreq else None):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Department access denied")
+
+    safe_cands = get_safe_candidates(block_request_id, db)
+    return {
+        "block_request_id": block_request_id,
+        "total_safe_candidates": len(safe_cands),
+        "safe_candidates": safe_cands,
     }
 
 

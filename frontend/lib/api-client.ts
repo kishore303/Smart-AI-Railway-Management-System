@@ -3,6 +3,9 @@ import { getApiErrorMessage } from "@/types/auth";
 const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const TOKEN_KEY = "sih26027_token";
 
+// In-flight request cache for deduplication
+const inflightRequests = new Map<string, Promise<unknown>>();
+
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
   return window.localStorage.getItem(TOKEN_KEY);
@@ -28,6 +31,12 @@ export class ApiError extends Error {
   }
 }
 
+function getRequestKey(path: string, options: RequestInit = {}): string {
+  const method = options.method || "GET";
+  const body = options.body ? JSON.stringify(options.body) : "";
+  return `${method}:${path}:${body}`;
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {
@@ -36,25 +45,45 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   };
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  let res: Response;
-  try {
-    res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
-  } catch {
-    throw new ApiError(0, { message: "Unable to connect to the railway service. Please try again." });
+  // Request deduplication for GET requests
+  const isGet = !options.method || options.method === "GET";
+  const key = getRequestKey(path, options);
+  
+  if (isGet && inflightRequests.has(key)) {
+    return inflightRequests.get(key) as Promise<T>;
   }
 
-  let body: unknown = null;
-  try {
-    body = await res.json();
-  } catch {
-    body = null;
-  }
+  const requestPromise = (async (): Promise<T> => {
+    let res: Response;
+    try {
+      res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
+    } catch {
+      throw new ApiError(0, { message: "Unable to connect to the railway service. Please try again." });
+    }
 
-  if (!res.ok) {
-    if (res.status === 401) setToken(null);
-    throw new ApiError(res.status, body);
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+
+    if (!res.ok) {
+      if (res.status === 401) setToken(null);
+      throw new ApiError(res.status, body);
+    }
+
+    return body as T;
+  })();
+
+  if (isGet) inflightRequests.set(key, requestPromise);
+  try {
+    return await requestPromise;
+  } finally {
+    if (isGet && inflightRequests.get(key) === requestPromise) {
+      inflightRequests.delete(key);
+    }
   }
-  return body as T;
 }
 
 export const api = {

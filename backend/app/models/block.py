@@ -32,17 +32,28 @@ class BlockIntegrationRequest(Base):
     target_block_id = Column(BigInteger, ForeignKey("block_requests.id", ondelete="CASCADE"), nullable=False)
     requesting_department_id = Column(BigInteger, ForeignKey("departments.id"), nullable=False)
     target_department_id = Column(BigInteger, ForeignKey("departments.id"), nullable=False)
+    section_id = Column(BigInteger, ForeignKey("railway_sections.id"), nullable=True)
+    track_id = Column(BigInteger, ForeignKey("tracks.id"), nullable=True)
+    overlap_start = Column(DateTime(timezone=True), nullable=True)
+    overlap_end = Column(DateTime(timezone=True), nullable=True)
     overlap_duration_mins = Column(Integer, nullable=True)
-    compatibility_status = Column(String(30), nullable=True)
+    coordination_score = Column(Numeric(5, 2), nullable=True)
+    detection_reason = Column(Text, nullable=True)
+    spatial_status = Column(String(50), nullable=True)
+    compatibility_status = Column(String(50), nullable=True)
     requested_by = Column(BigInteger, ForeignKey("users.id"), nullable=False)
     response_by = Column(BigInteger, ForeignKey("users.id"), nullable=True)
     response = Column(PGEnum("ACCEPT","REJECT","MODIFY", name="integration_response", create_type=False), nullable=True)
     reason = Column(Text, nullable=True)
+    modified_start = Column(DateTime(timezone=True), nullable=True)
+    modified_end = Column(DateTime(timezone=True), nullable=True)
     final_status = Column(PGEnum("PENDING","ACCEPTED","REJECTED","MODIFIED","APPROVED", name="integration_final_status", create_type=False), nullable=False, server_default="PENDING")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
 
 class OptimizedBlock(Base):
+
     __tablename__ = "optimized_blocks"
     __table_args__ = (CheckConstraint("end_time > start_time", name="optimized_blocks_window_check"),)
 
@@ -60,7 +71,7 @@ class OptimizedBlock(Base):
     combined_departments = Column(ARRAY(Text), nullable=True)
     optimization_score = Column(Numeric(6, 3), nullable=True)
     recommendation_reason = Column(Text, nullable=True)
-    status = Column(PGEnum("PROPOSED","PENDING_APPROVAL","APPROVED","MODIFIED","REJECTED","ACTIVE","COMPLETED","CANCELLED", name="optimized_block_status", create_type=False), nullable=False, server_default="PROPOSED")
+    status = Column(PGEnum("PROPOSED","PENDING_APPROVAL","APPROVED","SCHEDULED","MODIFIED","REJECTED","ACTIVE","MAINTENANCE","CLEARANCE_PENDING","RELEASED","COMPLETED","CANCELLED", name="optimized_block_status", create_type=False), nullable=False, server_default="PROPOSED")
     approved_by = Column(BigInteger, ForeignKey("users.id"), nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
     modified_by = Column(BigInteger, ForeignKey("users.id"), nullable=True)
@@ -75,7 +86,7 @@ class BlockCandidate(Base):
     __tablename__ = "block_candidates"
     __table_args__ = (
         CheckConstraint("candidate_end > candidate_start", name="block_candidates_window_check"),
-        CheckConstraint("safety_status IN ('FEASIBLE','INFEASIBLE')", name="block_candidates_safety_check"),
+        CheckConstraint("safety_status IN ('FEASIBLE','INFEASIBLE','SAFE','UNSAFE')", name="block_candidates_safety_check"),
     )
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)

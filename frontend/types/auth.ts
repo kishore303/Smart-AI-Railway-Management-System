@@ -6,6 +6,7 @@ export interface BackendUserBrief {
   department: string;
   department_id: number;
   is_active: boolean;
+  permissions?: string[];
 }
 
 export interface LoginResponse {

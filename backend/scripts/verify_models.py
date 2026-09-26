@@ -40,6 +40,7 @@ EXPECTED_TABLES = [
     "block_integration_requests",
     "optimized_blocks",
     "block_candidates",
+    "safety_validations",
     "optimized_block_sources",
     "block_affected_trains",
     "block_resource_allocations",
@@ -147,11 +148,11 @@ def main():
         depts = conn.execute(text("SELECT code FROM departments ORDER BY id")).fetchall()
         print(f"Departments: {[r[0] for r in depts]}")
 
-        # Check department_roles count = 10
+        # Check department_roles count = 13 (all 13 valid roles)
         cnt = conn.execute(text("SELECT count(*) FROM department_roles")).scalar()
         print(f"department_roles rows: {cnt}")
-        if cnt != 10:
-            print(f"WARN — expected 10 department_roles, got {cnt}")
+        if cnt != 13:
+            print(f"WARN — expected 13 department_roles, got {cnt}")
 
         # Check triggers
         trigs = conn.execute(text("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema='public'")).fetchall()

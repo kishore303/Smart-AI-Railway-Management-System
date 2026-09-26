@@ -29,6 +29,8 @@ function DetailContent({ integrationId }: { integrationId: string }) {
 
   const [response, setResponse] = useState<IntegrationResponse>("ACCEPT");
   const [reason, setReason] = useState("");
+  const [modifiedStart, setModifiedStart] = useState("");
+  const [modifiedEnd, setModifiedEnd] = useState("");
   const [acting, setActing] = useState(false);
   const [actError, setActError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -39,6 +41,8 @@ function DetailContent({ integrationId }: { integrationId: string }) {
     try {
       const r = await api.get<IntegrationRequest>(`/api/integration/requests/${integrationId}`);
       setData(r);
+      if (r.modified_start) setModifiedStart(r.modified_start.slice(0, 16));
+      if (r.modified_end) setModifiedEnd(r.modified_end.slice(0, 16));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Unable to connect to the railway service. Please try again.");
     } finally {
@@ -52,11 +56,23 @@ function DetailContent({ integrationId }: { integrationId: string }) {
 
   async function submitRespond() {
     if (acting) return;
+    if (response === "REJECT" && !reason.trim()) {
+      setActError("Rejection reason is mandatory. Please state why coordination is not possible.");
+      return;
+    }
+    if (response === "MODIFY" && (!modifiedStart || !modifiedEnd)) {
+      setActError("Proposed modified start and end times are required for a MODIFY response.");
+      return;
+    }
     setActing(true);
     setActError(null);
     try {
       const payload: Record<string, unknown> = { response };
       if (reason.trim() !== "") payload.reason = reason.trim().slice(0, 1000);
+      if (response === "MODIFY") {
+        payload.modified_start = new Date(modifiedStart).toISOString();
+        payload.modified_end = new Date(modifiedEnd).toISOString();
+      }
       const r = await api.post<IntegrationRequest>(`/api/integration/requests/${integrationId}/respond`, payload);
       setData(r);
       setConfirming(false);
@@ -117,28 +133,60 @@ function DetailContent({ integrationId }: { integrationId: string }) {
       <div className="gov-page-header">
         <div>
           <h2 className="gov-title">
-            Integration Request #{data.id}{" "}
+            Coordination Request #{data.id}{" "}
             <span className={`gov-badge gov-badge-${integrationBadgeKind(data.final_status)}`}>{data.final_status}</span>
           </h2>
+          <p className="gov-subtitle">Cross-departmental block integration and window synchronization review.</p>
         </div>
       </div>
 
       <div className="gov-card">
         <div className="gov-section-header">
-          <h3>Request Details</h3>
+          <h3>Coordination & Asset Parameters</h3>
+          {data.coordination_score != null && (
+            <span className="gov-badge gov-badge-info" style={{ fontSize: "0.85rem" }}>
+              Match Score: {data.coordination_score}%
+            </span>
+          )}
         </div>
         <div className="gov-kv-grid">
-          <span className="gov-kv-label">Source Block</span>
-          <span className="gov-kv-value"><Link className="gov-link" href={`/blocks/${data.source_block_id}`}>{data.source_block_id}</Link></span>
-          <span className="gov-kv-label">Target Block</span>
-          <span className="gov-kv-value"><Link className="gov-link" href={`/blocks/${data.target_block_id}`}>{data.target_block_id}</Link></span>
-          <span className="gov-kv-label">Requesting Department</span>
-          <span className="gov-kv-value">{data.requesting_department_code} (ID {data.requesting_department_id})</span>
-          <span className="gov-kv-label">Target Department</span>
-          <span className="gov-kv-value">{data.target_department_code} (ID {data.target_department_id})</span>
-          <span className="gov-kv-label">Overlap</span>
-          <span className="gov-kv-value">{data.overlap_duration_mins != null ? `${data.overlap_duration_mins} mins` : "—"}</span>
-          <span className="gov-kv-label">Compatibility</span>
+          <span className="gov-kv-label">Source Request</span>
+          <span className="gov-kv-value">
+            <Link className="gov-link" href={`/blocks/${data.source_block_id}`}>
+              {data.source_block_code ?? `Block #${data.source_block_id}`}
+            </Link>{" "}
+            ({data.requesting_department_code})
+          </span>
+
+          <span className="gov-kv-label">Target Request</span>
+          <span className="gov-kv-value">
+            <Link className="gov-link" href={`/blocks/${data.target_block_id}`}>
+              {data.target_block_code ?? `Block #${data.target_block_id}`}
+            </Link>{" "}
+            ({data.target_department_code})
+          </span>
+
+          <span className="gov-kv-label">Section / Track</span>
+          <span className="gov-kv-value">
+            {data.section_id != null ? `Section #${data.section_id}` : "Universal / Unknown"} &bull;{" "}
+            {data.track_id != null ? `Track #${data.track_id}` : "Unassigned"}
+          </span>
+
+          <span className="gov-kv-label">Spatial Co-location</span>
+          <span className="gov-kv-value">
+            {data.spatial_status ? (
+              <span className={`gov-badge gov-badge-${data.spatial_status === "SAME_TRACK" ? "green" : data.spatial_status === "ADJACENT_TRACK" ? "amber" : "info"}`}>
+                {data.spatial_status.replace(/_/g, " ")}
+              </span>
+            ) : "—"}
+          </span>
+
+          <span className="gov-kv-label">Overlap Duration</span>
+          <span className="gov-kv-value font-semibold">
+            {data.overlap_duration_mins != null ? `${data.overlap_duration_mins} mins` : "—"}
+          </span>
+
+          <span className="gov-kv-label">Preliminary Status</span>
           <span className="gov-kv-value">
             {data.compatibility_status ? (
               <span className={`gov-badge gov-badge-${data.compatibility_status === "COMPATIBLE" ? "green" : data.compatibility_status === "INCOMPATIBLE" ? "red" : "amber"}`}>
@@ -146,7 +194,24 @@ function DetailContent({ integrationId }: { integrationId: string }) {
               </span>
             ) : "—"}
           </span>
-          <span className="gov-kv-label">Response</span>
+
+          {data.detection_reason && (
+            <>
+              <span className="gov-kv-label">Detection Basis</span>
+              <span className="gov-kv-value text-muted" style={{ gridColumn: "span 3" }}>{data.detection_reason}</span>
+            </>
+          )}
+
+          {data.modified_start && (
+            <>
+              <span className="gov-kv-label">Proposed Modified Window</span>
+              <span className="gov-kv-value" style={{ gridColumn: "span 3" }}>
+                {new Date(data.modified_start).toLocaleString()} &rarr; {data.modified_end ? new Date(data.modified_end).toLocaleString() : "—"}
+              </span>
+            </>
+          )}
+
+          <span className="gov-kv-label">Response Decision</span>
           <span className="gov-kv-value">
             {data.response ? (
               <span className={`gov-badge gov-badge-${data.response === "ACCEPT" ? "green" : data.response === "REJECT" ? "red" : "amber"}`}>
@@ -154,13 +219,17 @@ function DetailContent({ integrationId }: { integrationId: string }) {
               </span>
             ) : "—"}
           </span>
-          <span className="gov-kv-label">Reason</span>
+
+          <span className="gov-kv-label">Comments / Notes</span>
           <span className="gov-kv-value">{data.reason ?? "—"}</span>
+
           <span className="gov-kv-label">Requested By</span>
           <span className="gov-kv-value">User #{data.requested_by}</span>
-          <span className="gov-kv-label">Response By</span>
+
+          <span className="gov-kv-label">Responded By</span>
           <span className="gov-kv-value">{data.response_by != null ? `User #${data.response_by}` : "—"}</span>
-          <span className="gov-kv-label">Created</span>
+
+          <span className="gov-kv-label">Created At</span>
           <span className="gov-kv-value">{data.created_at ? new Date(data.created_at).toLocaleString() : "—"}</span>
         </div>
         <div className="gov-info-box" style={{ marginTop: 12 }}>
@@ -171,11 +240,10 @@ function DetailContent({ integrationId }: { integrationId: string }) {
       {pending ? (
         <div className="gov-card gov-card-accent">
           <div className="gov-section-header">
-            <h3>Respond — Target Department Only</h3>
+            <h3>Department Review & Coordination Action</h3>
           </div>
           <div className="gov-info-box">
-            Only the target department (or Authorized Official) may respond. The requester cannot
-            respond to their own request — the backend enforces this.
+            Only authorized personnel from <strong>{data.target_department_code}</strong> (or Authorized Officials) may respond. The requesting department cannot approve its own proposal.
           </div>
           <div className="gov-tabs" style={{ marginTop: 12 }}>
             {(["ACCEPT", "REJECT", "MODIFY"] as IntegrationResponse[]).map((r) => (
@@ -189,15 +257,52 @@ function DetailContent({ integrationId }: { integrationId: string }) {
                   setActError(null);
                 }}
               >
-                {r}
+                {r === "ACCEPT" ? "Accept Coordination" : r === "REJECT" ? "Reject Coordination" : "Propose Modified Window"}
               </button>
             ))}
           </div>
-          <label className="gov-label" htmlFor="int-resp-reason">Reason / Comments (optional)</label>
+
+          {response === "MODIFY" && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginTop: 12 }}>
+              <div>
+                <label className="gov-label" htmlFor="mod-start">Proposed Start Time *</label>
+                <input
+                  id="mod-start"
+                  type="datetime-local"
+                  className="gov-input"
+                  value={modifiedStart}
+                  onChange={(e) => setModifiedStart(e.target.value)}
+                  required
+                />
+              </div>
+              <div>
+                <label className="gov-label" htmlFor="mod-end">Proposed End Time *</label>
+                <input
+                  id="mod-end"
+                  type="datetime-local"
+                  className="gov-input"
+                  value={modifiedEnd}
+                  onChange={(e) => setModifiedEnd(e.target.value)}
+                  required
+                />
+              </div>
+            </div>
+          )}
+
+          <label className="gov-label" htmlFor="int-resp-reason" style={{ marginTop: 12 }}>
+            {response === "REJECT" ? "Reason for Rejection (Mandatory) *" : response === "MODIFY" ? "Modification Rationale *" : "Reason / Operational Notes (Optional)"}
+          </label>
           <textarea
             id="int-resp-reason"
             className="gov-input"
             rows={3}
+            placeholder={
+              response === "REJECT"
+                ? "State operational or equipment incompatibility reason..."
+                : response === "MODIFY"
+                ? "Explain why the modified time window is needed..."
+                : "Add notes regarding joint possession, gang deployment, or power shutoff..."
+            }
             value={reason}
             onChange={(e) => setReason(e.target.value)}
             maxLength={1000}
@@ -212,7 +317,7 @@ function DetailContent({ integrationId }: { integrationId: string }) {
                   setConfirming(true);
                 }}
               >
-                Review {response}
+                Review & Confirm {response}
               </button>
             </div>
           ) : (
@@ -230,20 +335,21 @@ function DetailContent({ integrationId }: { integrationId: string }) {
           )}
           <hr className="gov-divider" />
           <div className="gov-section-header">
-            <h4>Cancel Request (Requester or Official)</h4>
+            <h4>Withdraw Request (Requester or Official)</h4>
           </div>
           <button className="gov-btn gov-btn-danger" onClick={() => void onCancel()} disabled={acting}>
-            Cancel This Request
+            Cancel / Withdraw This Request
           </button>
         </div>
       ) : (
         <div className="gov-card gov-card-warning">
           <div className="gov-info-box">
-            This request is {data.final_status} and can no longer be actioned.
-            {data.final_status === "ACCEPTED" ? " Acceptance is a planning-level agreement — Safety Engine validation, optimization, and official approval are still required." : null}
+            This request is <strong>{data.final_status}</strong> and can no longer be actioned.
+            {data.final_status === "ACCEPTED" ? " Note: Acceptance represents a planning-level coordination agreement. Formal safety isolation, OR-Tools corridor optimization, and Operating Department authorization will follow in downstream stages." : null}
           </div>
         </div>
       )}
     </div>
   );
 }
+

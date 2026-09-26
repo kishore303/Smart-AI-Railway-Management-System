@@ -50,7 +50,8 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 
 CREATE TYPE user_role AS ENUM (
     'MAINTENANCE_STAFF',
-    'ENGINEER_REVIEWER',
+    'JUNIOR_ENGINEER',
+    'SENIOR_SECTION_ENGINEER',
     'OPERATOR',
     'CONTROLLER',
     'AUTHORIZED_OFFICIAL',
@@ -470,6 +471,31 @@ CREATE TRIGGER trg_maintenance_requests_updated_at
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- =====================================================================
+-- 17b. MAINTENANCE_AREAS
+-- =====================================================================
+
+CREATE TABLE maintenance_areas (
+    id                        BIGSERIAL PRIMARY KEY,
+    maintenance_request_id    BIGINT NOT NULL UNIQUE REFERENCES maintenance_requests(id) ON DELETE CASCADE,
+    section_id                BIGINT NOT NULL REFERENCES railway_sections(id),
+    track_id                  BIGINT NOT NULL REFERENCES tracks(id),
+    start_km                  NUMERIC(10,3) NOT NULL,
+    end_km                    NUMERIC(10,3) NOT NULL,
+    length_km                 NUMERIC(10,3) NOT NULL,
+    defined_by                BIGINT NOT NULL REFERENCES users(id),
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (end_km > start_km)
+);
+
+CREATE INDEX idx_maintenance_areas_request ON maintenance_areas(maintenance_request_id);
+CREATE INDEX idx_maintenance_areas_section ON maintenance_areas(section_id);
+CREATE INDEX idx_maintenance_areas_track ON maintenance_areas(track_id);
+CREATE TRIGGER trg_maintenance_areas_updated_at
+    BEFORE UPDATE ON maintenance_areas
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =====================================================================
 -- 18. MAINTENANCE_PREDICTIONS
 -- input_features column added [gap-closing, Section 11.3 â€” "only
 -- prediction outputs are stored; the feature vector sent to the model
@@ -485,7 +511,7 @@ CREATE TABLE maintenance_predictions (
     train_impact_score        NUMERIC(6,3),
     predicted_delay_mins      INT,
     affected_train_count      INT,
-    model_version             VARCHAR(50),
+    model_version             VARCHAR(255),
     input_features            JSONB,   -- [gap-closing] logged feature vector for audit/explainability
     predicted_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -552,14 +578,24 @@ CREATE TABLE block_integration_requests (
     target_block_id             BIGINT NOT NULL REFERENCES block_requests(id) ON DELETE CASCADE,
     requesting_department_id    BIGINT NOT NULL REFERENCES departments(id),
     target_department_id        BIGINT NOT NULL REFERENCES departments(id),
+    section_id                  BIGINT REFERENCES railway_sections(id),
+    track_id                    BIGINT REFERENCES tracks(id),
+    overlap_start               TIMESTAMPTZ,
+    overlap_end                 TIMESTAMPTZ,
     overlap_duration_mins       INT,
-    compatibility_status        VARCHAR(30),
+    coordination_score          NUMERIC(5,2),
+    detection_reason            TEXT,
+    spatial_status              VARCHAR(50),
+    compatibility_status        VARCHAR(50),
     requested_by                BIGINT NOT NULL REFERENCES users(id),
     response_by                 BIGINT REFERENCES users(id),
     response                    integration_response,
     reason                      TEXT,
+    modified_start              TIMESTAMPTZ,
+    modified_end                TIMESTAMPTZ,
     final_status                integration_final_status NOT NULL DEFAULT 'PENDING',
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (source_block_id <> target_block_id),
     CHECK (requesting_department_id <> target_department_id)
 );
@@ -630,7 +666,7 @@ CREATE TABLE block_candidates (
     predicted_delay_mins          INT,
     affected_train_count          INT,
     asset_risk_score              NUMERIC(4,3),
-    safety_status                 VARCHAR(12) NOT NULL CHECK (safety_status IN ('FEASIBLE','INFEASIBLE')),
+    safety_status                 VARCHAR(12) NOT NULL CHECK (safety_status IN ('FEASIBLE','INFEASIBLE','SAFE','UNSAFE')),
     safety_rejection_reason       TEXT,
     optimization_score            NUMERIC(6,3),
     is_selected                   BOOLEAN NOT NULL DEFAULT FALSE,
@@ -641,6 +677,32 @@ CREATE TABLE block_candidates (
 
 CREATE INDEX idx_block_candidates_request ON block_candidates(block_request_id);
 CREATE INDEX idx_block_candidates_selected ON block_candidates(is_selected);
+
+-- =====================================================================
+-- 23b. SAFETY_VALIDATIONS
+-- Persistent safety validation results for block candidates.
+-- A candidate marked UNSAFE / is_safe_for_optimization = FALSE must never
+-- be sent to the OR-Tools optimizer.
+-- =====================================================================
+
+CREATE TABLE safety_validations (
+    id                        BIGSERIAL PRIMARY KEY,
+    candidate_id              BIGINT NOT NULL UNIQUE REFERENCES block_candidates(id) ON DELETE CASCADE,
+    block_request_id          BIGINT NOT NULL REFERENCES block_requests(id) ON DELETE CASCADE,
+    overall_status            VARCHAR(10) NOT NULL, -- SAFE / UNSAFE
+    is_safe_for_optimization  BOOLEAN NOT NULL,
+    checks                    JSONB NOT NULL,
+    rejection_reasons         JSONB,
+    warnings                  JSONB,
+    validated_by              BIGINT REFERENCES users(id),
+    validated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_safety_validations_candidate ON safety_validations(candidate_id);
+CREATE INDEX idx_safety_validations_block_req ON safety_validations(block_request_id);
+CREATE INDEX idx_safety_validations_status ON safety_validations(overall_status);
+CREATE INDEX idx_safety_validations_safe ON safety_validations(is_safe_for_optimization);
 
 -- =====================================================================
 -- 24. OPTIMIZED_BLOCK_SOURCES  (supporting table â€” see design note 4)
@@ -733,22 +795,37 @@ CREATE INDEX idx_notifications_created ON notifications(created_at DESC);
 -- =====================================================================
 
 CREATE TABLE incidents (
-    id                     BIGSERIAL PRIMARY KEY,
-    incident_code          VARCHAR(30) NOT NULL UNIQUE,
-    incident_type          incident_type NOT NULL,
-    severity               severity_level NOT NULL DEFAULT 'HIGH',
-    description            TEXT,
-    section_id             BIGINT REFERENCES railway_sections(id),
-    track_id               BIGINT REFERENCES tracks(id),
-    latitude               NUMERIC(9,6),
-    longitude              NUMERIC(9,6),
-    location               geometry(Point, 4326),
-    reported_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-    reported_by            BIGINT REFERENCES users(id),
-    railway_alert_status   VARCHAR(30),
-    police_alert_status    VARCHAR(30),
-    response_status        incident_response_status NOT NULL DEFAULT 'OPEN',
-    clearance_time         TIMESTAMPTZ
+    id                          BIGSERIAL PRIMARY KEY,
+    incident_code               VARCHAR(30) NOT NULL UNIQUE,
+    incident_type               VARCHAR(50) NOT NULL,
+    severity                    severity_level NOT NULL DEFAULT 'HIGH',
+    description                 TEXT,
+    section_id                  BIGINT REFERENCES railway_sections(id),
+    track_id                    BIGINT REFERENCES tracks(id),
+    asset_id                    BIGINT REFERENCES assets(id),
+    latitude                    NUMERIC(9,6),
+    longitude                   NUMERIC(9,6),
+    location                    geometry(Point, 4326),
+    status                      VARCHAR(50) NOT NULL DEFAULT 'REPORTED',
+    response_status             VARCHAR(50) NOT NULL DEFAULT 'OPEN',
+    reported_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    reported_by                 BIGINT REFERENCES users(id),
+    railway_alert_status        VARCHAR(30),
+    police_alert_status         VARCHAR(30),
+    acknowledged_at             TIMESTAMPTZ,
+    acknowledged_by             BIGINT REFERENCES users(id),
+    assessed_at                 TIMESTAMPTZ,
+    assessed_by                 BIGINT REFERENCES users(id),
+    assessment_notes            TEXT,
+    block_request_id            BIGINT REFERENCES block_requests(id),
+    selected_optimized_block_id BIGINT REFERENCES optimized_blocks(id),
+    clearance_time              TIMESTAMPTZ,
+    cleared_at                  TIMESTAMPTZ,
+    cleared_by                  BIGINT REFERENCES users(id),
+    clearance_notes             TEXT,
+    closed_at                   TIMESTAMPTZ,
+    closed_by                   BIGINT REFERENCES users(id),
+    is_simulated                BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX idx_incidents_section ON incidents(section_id);
@@ -769,12 +846,17 @@ CREATE TABLE emergency_responses (
     incident_id             BIGINT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
     authority_type          VARCHAR(50),
     authority_name          VARCHAR(150),
+    team_name               VARCHAR(150),
+    assigned_by             BIGINT REFERENCES users(id),
     notification_time       TIMESTAMPTZ,
     acknowledgement_time    TIMESTAMPTZ,
     arrival_time            TIMESTAMPTZ,
+    work_start_time         TIMESTAMPTZ,
+    completion_time         TIMESTAMPTZ,
     clearance_time          TIMESTAMPTZ,
-    status                  emergency_response_status NOT NULL DEFAULT 'ALERT_RECEIVED',
+    status                  VARCHAR(50) NOT NULL DEFAULT 'ALERT_RECEIVED',
     notes                   TEXT,
+    assigned_resources      JSONB,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -877,11 +959,14 @@ SELECT d.id, r.role
 FROM departments d
 JOIN (VALUES
     ('ENG',       'MAINTENANCE_STAFF'::user_role),
-    ('ENG',       'ENGINEER_REVIEWER'::user_role),
+    ('ENG',       'JUNIOR_ENGINEER'::user_role),
+    ('ENG',       'SENIOR_SECTION_ENGINEER'::user_role),
     ('ELEC',      'MAINTENANCE_STAFF'::user_role),
-    ('ELEC',      'ENGINEER_REVIEWER'::user_role),
+    ('ELEC',      'JUNIOR_ENGINEER'::user_role),
+    ('ELEC',      'SENIOR_SECTION_ENGINEER'::user_role),
     ('SNT',       'MAINTENANCE_STAFF'::user_role),
-    ('SNT',       'ENGINEER_REVIEWER'::user_role),
+    ('SNT',       'JUNIOR_ENGINEER'::user_role),
+    ('SNT',       'SENIOR_SECTION_ENGINEER'::user_role),
     ('OPS',       'OPERATOR'::user_role),
     ('CONTROL',   'CONTROLLER'::user_role),
     ('RAILWAY',   'AUTHORIZED_OFFICIAL'::user_role),

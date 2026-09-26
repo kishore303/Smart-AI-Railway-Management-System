@@ -8,11 +8,12 @@ from typing import Any
 
 _ARTIFACT_ROOT = Path(__file__).resolve().parents[2] / "model_artifacts"
 
-# Expected MD5s (verified from Module 1/VERIFIED)
+# Expected MD5s (verified from Module 1/VERIFIED + Phase 5 trained duration model)
 EXPECTED_MD5 = {
     "train_impact": "6b04723260427bc891736b7ce74adf93",
     "asset_risk": "3914c6e942b7b3eecfd7ed5481fc5b57",
     "maintenance_duration_data": "bc501e69d592932aad487d0a4909675c",
+    "maintenance_duration_model": "e9223eb81eff8b28a45da5417361bc8a",
 }
 
 _cache: dict[str, Any] = {}
@@ -94,6 +95,29 @@ def load_maintenance_data():
     return obj
 
 
+def load_maintenance_duration_model():
+    """Load maintenance_duration_model.joblib — genuine trained RandomForestRegressor pipeline."""
+    key = "maintenance_duration_model"
+    if key in _cache:
+        return _cache[key]
+    _ensure_shim()
+    p = _ARTIFACT_ROOT / "maintenance_duration" / "maintenance_duration_model.joblib"
+    if not p.exists():
+        raise FileNotFoundError(f"Maintenance duration model artifact not found at {p}. Run train_maintenance_duration.py first.")
+    if not verify_md5(p, EXPECTED_MD5["maintenance_duration_model"]):
+        raise ValueError(f"MD5 mismatch for {p}: expected {EXPECTED_MD5['maintenance_duration_model']}, got {md5_of_file(p)}")
+    obj = joblib.load(p)
+    if not hasattr(obj, "predict"):
+        raise TypeError("maintenance_duration_model.joblib does not have predict() method")
+    _cache[key] = obj
+    return obj
+
+
+# Convenience aliases
+load_train_delay_model = load_train_impact
+load_risk_model = load_asset_risk
+
+
 def clear_cache():
     _cache.clear()
 
@@ -103,6 +127,7 @@ def model_info(key: str) -> dict:
         "train_impact": _ARTIFACT_ROOT / "train_impact" / "etrain_delay_model_pipeline.joblib",
         "asset_risk": _ARTIFACT_ROOT / "asset_risk" / "railway_maintenance_model_pipeline.joblib",
         "maintenance_duration_data": _ARTIFACT_ROOT / "maintenance_duration" / "maintenance_data.joblib",
+        "maintenance_duration_model": _ARTIFACT_ROOT / "maintenance_duration" / "maintenance_duration_model.joblib",
     }
     p = path_map.get(key)
     if not p or not p.exists():

@@ -16,7 +16,7 @@ import type {
 } from "@/types/execution";
 import { executionBadgeKind } from "@/types/execution";
 
-const EXECUTION_ROLES = ["CONTROLLER", "AUTHORIZED_OFFICIAL", "ENGINEER_REVIEWER"];
+const EXECUTION_ROLES = ["CONTROLLER", "AUTHORIZED_OFFICIAL", "SENIOR_SECTION_ENGINEER"];
 
 export default function ExecutionDetailPage() {
   const params = useParams<{ id: string }>();

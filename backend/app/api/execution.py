@@ -18,8 +18,8 @@ from app.schemas.execution import ResourceAllocateRequest, ExecutionStartRequest
 router = APIRouter(prefix="/api/execution", tags=["execution"])
 
 # Roles
-EXECUTION_ROLES = {"CONTROLLER", "AUTHORIZED_OFFICIAL", "ENGINEER_REVIEWER"}
-VIEW_ROLES = {"MAINTENANCE_STAFF", "ENGINEER_REVIEWER", "CONTROLLER", "AUTHORIZED_OFFICIAL", "OPERATOR", "EMERGENCY_OPERATOR"}
+EXECUTION_ROLES = {"CONTROLLER", "AUTHORIZED_OFFICIAL", "SENIOR_SECTION_ENGINEER"}
+VIEW_ROLES = {"MAINTENANCE_STAFF", "JUNIOR_ENGINEER", "SENIOR_SECTION_ENGINEER", "CONTROLLER", "AUTHORIZED_OFFICIAL", "OPERATOR", "EMERGENCY_OPERATOR"}
 
 
 def _audit(db: Session, user_id, action, entity_id=None, desc=None):
@@ -64,8 +64,8 @@ def _check_execution_eligibility(db: Session, ob: OptimizedBlock) -> tuple[bool,
     reasons = []
     is_eligible = True
 
-    if ob.status != "APPROVED":
-        reasons.append(f"Optimized block status {ob.status} not APPROVED — cannot execute")
+    if ob.status not in ("APPROVED", "SCHEDULED"):
+        reasons.append(f"Optimized block status {ob.status} not APPROVED/SCHEDULED — cannot execute")
         is_eligible = False
 
     # Find selected candidate
@@ -341,9 +341,9 @@ def start_execution(optimized_block_id: int, payload: ExecutionStartRequest = No
     if mreq and not can_access_department_resource(current_user, mreq.department_id, db):
         if current_user.role not in ("AUTHORIZED_OFFICIAL", "CONTROLLER"):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Department access denied")
-    # Must be APPROVED
-    if ob.status != "APPROVED":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Cannot start from status {ob.status}, must be APPROVED")
+    # Must be APPROVED or SCHEDULED
+    if ob.status not in ("APPROVED", "SCHEDULED"):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Cannot start from status {ob.status}, must be APPROVED/SCHEDULED")
     # Re-check safety
     cand = db.query(BlockCandidate).filter(BlockCandidate.selected_optimized_block_id == ob.id).first()
     if not cand:

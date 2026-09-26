@@ -105,7 +105,7 @@ function ListContent() {
         <div className="gov-alert gov-alert-error" role="alert">{error}</div>
       ) : null}
 
-      {!loading && !error && data && data.items.length === 0 ? (
+      {!loading && !error && data && (data.items ?? []).length === 0 ? (
         <div className="gov-card">
           <div className="gov-empty">
             <p className="gov-muted">No maintenance requests found.</p>
@@ -113,7 +113,7 @@ function ListContent() {
         </div>
       ) : null}
 
-      {!loading && !error && data && data.items.length > 0 ? (
+      {!loading && !error && data && (data.items ?? []).length > 0 ? (
         <div className="gov-card">
           <div className="gov-table-wrap">
             <table className="gov-table">
@@ -129,7 +129,7 @@ function ListContent() {
                 </tr>
               </thead>
               <tbody>
-                {data.items.map((r) => (
+                {(data.items ?? []).map((r) => (
                   <tr key={r.id}>
                     <td>{r.request_code}</td>
                     <td>{r.maintenance_type}</td>
@@ -151,7 +151,7 @@ function ListContent() {
               </tbody>
             </table>
           </div>
-          <p className="gov-muted" style={{ marginTop: 8 }}>Total: {data.total}</p>
+          <p className="gov-muted" style={{ marginTop: 8 }}>Total: {data.total ?? 0}</p>
         </div>
       ) : null}
     </div>

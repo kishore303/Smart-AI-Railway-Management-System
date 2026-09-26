@@ -38,12 +38,32 @@ export interface Candidate {
 
 export interface CandidateGenerateResponse {
   generated: number;
+  safe_count?: number;
+  unsafe_count?: number;
   candidates: Candidate[];
   message: string;
 }
 
+export interface SafeCandidate {
+  candidate_id: number;
+  block_request_id: number;
+  section_id: number;
+  track_id: number | null;
+  start_time: string;
+  end_time: string;
+  duration_minutes: number;
+  predicted_duration_mins: number | null;
+  predicted_delay_mins: number | null;
+  affected_train_count?: number | null;
+  asset_risk_score: number | null;
+  safety_status: string;
+  is_safe_for_optimization: boolean;
+  warnings: string[];
+  validated_at: string | null;
+}
+
 export function planningBadgeKind(status: string): "green" | "amber" | "red" | "blue" {
-  if (status === "FEASIBLE") return "green";
-  if (status === "INFEASIBLE") return "red";
+  if (status === "FEASIBLE" || status === "SAFE") return "green";
+  if (status === "INFEASIBLE" || status === "UNSAFE") return "red";
   return "amber";
 }

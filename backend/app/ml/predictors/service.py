@@ -6,13 +6,23 @@ from app.models.audit import AuditLog
 
 
 def ensure_registry(db: Session):
-    """Seed ml_model_registry if empty — reflects actual artifacts."""
+    """Seed ml_model_registry if empty — reflects actual production artifacts."""
     if db.query(MlModelRegistry).count() > 0:
+        # Check if existing entries need updating from demo
+        demo_maint = db.query(MlModelRegistry).filter(MlModelRegistry.model_type == "MAINTENANCE_DURATION", MlModelRegistry.is_demo == True).first()
+        if demo_maint:
+            demo_maint.version = "maintenance_duration_v1_RF100_R2_0.82"
+            demo_maint.artifact_filename = "maintenance_duration_model.joblib"
+            demo_maint.is_demo = False
+            demo_maint.is_active = True
+            demo_maint.notes = "Trained RandomForestRegressor Pipeline on 5000-row maintenance_data.joblib (R2=0.82)"
+            db.commit()
         return
+
     entries = [
-        {"model_type": "TRAIN_IMPACT", "version": "train_impact_v1_sklearn1.6.1_RF100", "artifact_filename": "etrain_delay_model_pipeline.joblib", "is_demo": False, "is_active": True, "notes": "Verified 8 features, RF100"},
-        {"model_type": "ASSET_RISK", "version": "asset_risk_v1_sklearn1.6.1_RF100", "artifact_filename": "railway_maintenance_model_pipeline.joblib", "is_demo": False, "is_active": True, "notes": "31 features, RF classifier"},
-        {"model_type": "MAINTENANCE_DURATION", "version": "maintenance_duration_DEMO_v1_synthetic", "artifact_filename": "maintenance_data.joblib (DATASET)", "is_demo": True, "is_active": True, "notes": "DEMO/SYNTHETIC — genuine model not yet supplied, 5000-row dataset"},
+        {"model_type": "TRAIN_IMPACT", "version": "train_impact_v1_sklearn1.6.1_RF100", "artifact_filename": "etrain_delay_model_pipeline.joblib", "is_demo": False, "is_active": True, "notes": "Verified 8 features, RF100 regression pipeline"},
+        {"model_type": "ASSET_RISK", "version": "asset_risk_v1_sklearn1.6.1_RF100", "artifact_filename": "railway_maintenance_model_pipeline.joblib", "is_demo": False, "is_active": True, "notes": "Verified 31 features, RF classification pipeline"},
+        {"model_type": "MAINTENANCE_DURATION", "version": "maintenance_duration_v1_RF100_R2_0.82", "artifact_filename": "maintenance_duration_model.joblib", "is_demo": False, "is_active": True, "notes": "Trained RandomForestRegressor Pipeline on 5000-row maintenance_data.joblib (R2=0.82)"},
     ]
     for e in entries:
         r = MlModelRegistry(**e)

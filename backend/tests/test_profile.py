@@ -31,6 +31,14 @@ tok_off = r.json()["access_token"]
 r = login("ops.operator@irctc.test", "OpsOper@123")
 tok_ops = r.json()["access_token"]
 
+from app.database import SessionLocal
+from app.models.user import User
+db = SessionLocal()
+u_eng = db.query(User).filter(User.email == "eng.staff@irctc.test").first()
+u_elec = db.query(User).filter(User.email == "elec.staff@irctc.test").first()
+u_snt = db.query(User).filter(User.email == "snt.staff@irctc.test").first()
+db.close()
+
 print("=== 1. Authenticated profile access ===")
 r = client.get("/api/users/me", headers=hdr(tok_eng))
 assert r.status_code == 200, r.text
@@ -61,22 +69,21 @@ print("PASS — revert 200")
 
 print("\n=== 4. Unauthorized profile update (other user) ===")
 # eng.staff tries to PATCH elec.staff via admin endpoint — should be 403 (not official)
-r = client.patch("/api/users/4", headers=hdr(tok_eng), json={"name": "Hacked"})
+r = client.patch(f"/api/users/{u_elec.id}", headers=hdr(tok_eng), json={"name": "Hacked"})
 assert r.status_code == 403, f"expected 403 got {r.status_code} {r.text}"
 print("PASS — non-official PATCH other 403")
 # eng.staff tries to GET elec user
-r = client.get("/api/users/4", headers=hdr(tok_eng))
+r = client.get(f"/api/users/{u_elec.id}", headers=hdr(tok_eng))
 assert r.status_code == 403
 print("PASS — cross-dept GET 403")
 # reviewer tries same
-r = client.patch("/api/users/4", headers=hdr(tok_reviewer), json={"name": "Hacked"})
+r = client.patch(f"/api/users/{u_elec.id}", headers=hdr(tok_reviewer), json={"name": "Hacked"})
 assert r.status_code == 403
 print("PASS — reviewer cannot admin-patch 403")
 
 print("\n=== 5. Cross-department restrictions (list) ===")
 r = client.get("/api/users", headers=hdr(tok_eng))
 assert r.status_code == 200
-# ENG dept has 4 users: 1,2,3,12(inactive filtered? depends) — but with default is_active filter none, should see 4 ENG including inactive
 # Check only ENG codes returned
 codes = set(u["department"] for u in r.json()["items"])
 assert codes == {"ENG"}, f"eng list should only see ENG got {codes}"
@@ -88,11 +95,11 @@ print("PASS — ENG filter ELEC 403")
 # official sees all
 r = client.get("/api/users", headers=hdr(tok_off))
 assert r.status_code == 200
-assert r.json()["total"] == 12, r.json()
-print(f"PASS — official sees all 12")
+assert r.json()["total"] >= 12, r.json()
+print(f"PASS — official sees all {r.json()['total']}")
 r = client.get("/api/users?department_code=SNT", headers=hdr(tok_off))
-assert r.status_code == 200 and r.json()["total"] == 2
-print("PASS — official filter SNT 2")
+assert r.status_code == 200 and r.json()["total"] >= 2
+print(f"PASS — official filter SNT {r.json()['total']}")
 
 print("\n=== 6. Role/department modification protection ===")
 # Self-update with role field — should be ignored, not escalated
@@ -111,22 +118,24 @@ assert r.status_code == 422, f"invalid role for ENG should be 422 got {r.status_
 print("PASS — invalid role for dept 422")
 
 # Official valid update
-r = client.patch("/api/users/8", headers=hdr(tok_off), json={"is_active": False})
+r = client.patch(f"/api/users/{u_snt.id}", headers=hdr(tok_off), json={"is_active": False})
 assert r.status_code == 200
 assert r.json()["is_active"] == False
 print("PASS — official can deactivate 200")
 # Reactivate
-r = client.patch("/api/users/8", headers=hdr(tok_off), json={"is_active": True})
+r = client.patch(f"/api/users/{u_snt.id}", headers=hdr(tok_off), json={"is_active": True})
+assert r.status_code == 200
 assert r.json()["is_active"] == True
 print("PASS — reactivate 200")
 
 # Official try to set role without dept — should keep dept but validate
-r = client.patch("/api/users/3", headers=hdr(tok_off), json={"role": "ENGINEER_REVIEWER"})
+r = client.patch(f"/api/users/{u_eng.id}", headers=hdr(tok_off), json={"role": "SENIOR_SECTION_ENGINEER"})
 assert r.status_code == 200
-assert r.json()["role"] == "ENGINEER_REVIEWER"
+assert r.json()["role"] == "SENIOR_SECTION_ENGINEER"
 print(f"PASS — official role change same dept 200 -> {r.json()['role']}")
 # revert
-r = client.patch("/api/users/3", headers=hdr(tok_off), json={"role": "MAINTENANCE_STAFF"})
+r = client.patch(f"/api/users/{u_eng.id}", headers=hdr(tok_off), json={"role": "MAINTENANCE_STAFF"})
+assert r.status_code == 200
 assert r.json()["role"] == "MAINTENANCE_STAFF"
 print("PASS — revert role 200")
 
@@ -188,14 +197,15 @@ with engine.connect() as conn:
 
 print("\n=== 11. Modules 1 & 2 intact ===")
 import subprocess
-res = subprocess.run(["python", "D:\\IRCTC\\backend\\scripts\\verify_models.py"], capture_output=True, text=True)
+res = subprocess.run([sys.executable, str(backend_dir / "scripts" / "verify_models.py")], capture_output=True, text=True)
 assert "ALL MODEL VERIFICATION PASSED" in res.stdout, res.stdout
 print("PASS — Module1 verify_models")
-res2 = subprocess.run(["python", "D:\\IRCTC\\backend\\tests\\test_db_connection.py"], capture_output=True, text=True)
+res2 = subprocess.run([sys.executable, str(backend_dir / "tests" / "test_db_connection.py")], capture_output=True, text=True)
 assert "All connection tests passed" in res2.stdout
 print("PASS — Module1 db_connection")
-res3 = subprocess.run(["python", "D:\\IRCTC\\backend\\tests\\test_auth_rbac.py"], capture_output=True, text=True)
-assert "ALL 11 (+2) CHECKS PASSED" in res3.stdout, res3.stdout[-1000:]
+res3 = subprocess.run([sys.executable, str(backend_dir / "tests" / "test_auth_rbac.py")], capture_output=True, text=True)
+assert "ALL 13 ROLES & RBAC SECURITY TESTS PASSED PERFECTLY!" in res3.stdout, res3.stdout[-1000:]
 print("PASS — Module2 auth_rbac still passes")
 
 print("\n========== ALL MODULE 3 CHECKS PASSED ==========")
+

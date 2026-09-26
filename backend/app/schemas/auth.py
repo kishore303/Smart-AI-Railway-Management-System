@@ -16,6 +16,7 @@ class UserBrief(BaseModel):
     department: str
     department_id: int
     is_active: bool
+    permissions: list[str] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

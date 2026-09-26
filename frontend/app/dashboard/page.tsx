@@ -113,18 +113,18 @@ function DashboardContent() {
               <span className="dash-band-sub">Demand · Planning · Approval · Safety</span>
             </div>
             <div className="stat-grid">
-              <StatCard title="Maintenance Requests" value={data.maintenance_requests.total} accent="navy">
-                {data.maintenance_requests.pending_review > 0 && (
+              <StatCard title="Maintenance Requests" value={data?.maintenance_requests?.total ?? 0} accent="navy">
+                {(data?.maintenance_requests?.pending_review ?? 0) > 0 && (
                   <span className="badge badge-amber">{data.maintenance_requests.pending_review} pending review</span>
                 )}
               </StatCard>
-              <StatCard title="Block Requests" value={data.block_planning.block_requests} accent="blue">
-                <span className="gov-muted">{data.block_planning.candidates} candidates generated</span>
+              <StatCard title="Block Requests" value={data?.block_planning?.block_requests ?? 0} accent="blue">
+                <span className="gov-muted">{data?.block_planning?.candidates ?? 0} candidates generated</span>
               </StatCard>
-              <StatCard title="Approved Blocks" value={data.block_planning.approved} accent="green">
-                <span className="badge badge-green">{data.block_planning.active} active</span>
+              <StatCard title="Approved Blocks" value={data?.block_planning?.approved ?? 0} accent="green">
+                <span className="badge badge-green">{data?.block_planning?.active ?? 0} active</span>
               </StatCard>
-              <StatCard title="Safety Validations" value={`${data.safety.safe}/${data.safety.total_validations}`} accent="green">
+              <StatCard title="Safety Validations" value={`${data?.safety?.safe ?? 0}/${data?.safety?.total_validations ?? 0}`} accent="green">
                 <span className="badge badge-green">All checks passing</span>
               </StatCard>
             </div>
@@ -137,21 +137,21 @@ function DashboardContent() {
               <span className="dash-band-sub">Coordination · Resources · Correspondence · Records</span>
             </div>
             <div className="stat-grid">
-              <StatCard title="Integration" value={data.integration.pending} accent="amber">
-                <span className="gov-muted">{data.integration.total} total requests</span>
+              <StatCard title="Integration" value={data?.integration?.pending ?? 0} accent="amber">
+                <span className="gov-muted">{data?.integration?.total ?? 0} total requests</span>
               </StatCard>
-              <StatCard title="Resources" value={data.resources.allocated} accent="blue">
-                <span className="gov-muted">{data.resources.total} total available</span>
+              <StatCard title="Resources" value={data?.resources?.allocated ?? 0} accent="blue">
+                <span className="gov-muted">{data?.resources?.total ?? 0} total available</span>
               </StatCard>
-              <StatCard title="Notifications" value={data.notifications.unread} accent={data.notifications.unread > 0 ? "amber" : "green"}>
-                {data.notifications.unread > 0 ? (
+              <StatCard title="Notifications" value={data?.notifications?.unread ?? 0} accent={(data?.notifications?.unread ?? 0) > 0 ? "amber" : "green"}>
+                {(data?.notifications?.unread ?? 0) > 0 ? (
                   <span className="badge badge-amber">Action needed</span>
                 ) : (
                   <span className="badge badge-green">All clear</span>
                 )}
               </StatCard>
-              <StatCard title="Audit Trail" value={data.audit.total} accent="navy">
-                <span className="gov-muted">{data.simulation.total} simulations run</span>
+              <StatCard title="Audit Trail" value={data?.audit?.total ?? 0} accent="navy">
+                <span className="gov-muted">{data?.simulation?.total ?? 0} simulations run</span>
               </StatCard>
             </div>
           </section>
@@ -165,7 +165,7 @@ function DashboardContent() {
             <div className="dash-grid-2">
               <section className="gov-card" aria-label="System health">
                 <div className="gov-section-header"><h3 className="gov-section-title">System Health</h3></div>
-              {health ? (
+              {health?.checks ? (
                 <table className="gov-table">
                   <thead>
                     <tr><th>Service</th><th>Status</th></tr>
@@ -192,7 +192,7 @@ function DashboardContent() {
 
             <section className="gov-card" aria-label="Recent activity">
               <div className="gov-section-header"><h3 className="gov-section-title">Recent Activity</h3></div>
-              {data.audit.recent.length === 0 ? (
+              {(data?.audit?.recent ?? []).length === 0 ? (
                 <p className="gov-muted">No recent activity recorded.</p>
               ) : (
                 <table className="gov-table">
@@ -200,7 +200,7 @@ function DashboardContent() {
                     <tr><th>Action</th><th>Type</th><th>Time</th></tr>
                   </thead>
                   <tbody>
-                    {data.audit.recent.slice(0, 8).map((r, i) => (
+                    {(data?.audit?.recent ?? []).slice(0, 8).map((r, i) => (
                       <tr key={`${r.action}-${i}`}>
                         <td style={{ fontWeight: 500 }}>{r.action}</td>
                         <td>{r.entity_type ?? "—"}</td>

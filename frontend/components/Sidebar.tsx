@@ -17,10 +17,13 @@ interface NavSection {
   items: NavItem[];
 }
 
-const SECTIONS: NavSection[] = [
+const ALL_SECTIONS: NavSection[] = [
   {
     title: "Overview",
-    items: [{ label: "Dashboard", href: "/dashboard", icon: "📊" }],
+    items: [
+      { label: "Dashboard", href: "/dashboard", icon: "📊" },
+      { label: "Operational Analytics", href: "/analytics", icon: "📈" },
+    ],
   },
   {
     title: "Maintenance",
@@ -32,6 +35,7 @@ const SECTIONS: NavSection[] = [
   {
     title: "Decision Support",
     items: [
+      { label: "Approval Center", href: "/approval-center", icon: "⚖" },
       { label: "ML Predictions", href: "/ml", icon: "🤖" },
       { label: "Safety", href: "/safety", icon: "🛡" },
       { label: "Recommendations", href: "/recommendations", icon: "✅" },
@@ -75,54 +79,128 @@ const SECTIONS: NavSection[] = [
   },
 ];
 
-// Demo/development visibility: the sidebar lists EVERY implemented module.
-// Each role's authorized subset below drives only the subtle lock indicator —
-// navigation itself is never blocked here. The backend remains authoritative
-// and rejects any operation the role may not perform.
+// Strict Role-Based Navigation Mapping per SIH26027 Master Specification
 export const ROLE_VISIBLE: Record<string, string[]> = {
-  MAINTENANCE_STAFF: ["Dashboard", "Maintenance Requests", "Railway Map", "Notifications", "Profile"],
-  ENGINEER_REVIEWER: ["Dashboard", "Maintenance Requests", "Review & Verification", "ML Predictions", "Safety", "Block Execution", "Resources", "Digital Twin", "What-If Simulation", "Notifications", "Profile"],
-  OPERATOR: ["Dashboard", "Block Planning", "ML Predictions", "Block Execution", "Resources", "Digital Twin", "What-If Simulation", "Notifications", "Profile"],
-  CONTROLLER: ["Dashboard", "Block Planning", "ML Predictions", "Block Execution", "Resources", "Cross-Department Integration", "Digital Twin", "What-If Simulation", "Notifications", "Profile"],
-  AUTHORIZED_OFFICIAL: ["Dashboard", "Recommendations", "ML Predictions", "Safety", "Block Execution", "Resources", "Digital Twin", "What-If Simulation", "Notifications", "Profile"],
-  EMERGENCY_OPERATOR: ["Dashboard", "Emergency Dashboard", "Emergency Incidents", "Railway Map", "Notifications", "Profile"],
+  MAINTENANCE_STAFF: [
+    "Dashboard",
+    "Maintenance Requests",
+    "Railway Map",
+    "Notifications",
+    "Profile",
+  ],
+  JUNIOR_ENGINEER: [
+    "Dashboard",
+    "Maintenance Requests",
+    "Review & Verification",
+    "Cross-Department Integration",
+    "Railway Map",
+    "Notifications",
+    "Profile",
+  ],
+  SENIOR_SECTION_ENGINEER: [
+    "Dashboard",
+    "Maintenance Requests",
+    "Review & Verification",
+    "Block Planning",
+    "Cross-Department Integration",
+    "Resources",
+    "ML Predictions",
+    "Digital Twin",
+    "Notifications",
+    "Profile",
+  ],
+  OPERATOR: [
+    "Dashboard",
+    "Operational Analytics",
+    "Block Planning",
+    "ML Predictions",
+    "Railway Map",
+    "Digital Twin",
+    "What-If Simulation",
+    "Notifications",
+    "Profile",
+  ],
+  CONTROLLER: [
+    "Dashboard",
+    "Operational Analytics",
+    "Block Planning",
+    "Block Execution",
+    "Cross-Department Integration",
+    "Railway Map",
+    "Emergency Dashboard",
+    "Emergency Incidents",
+    "Notifications",
+    "Profile",
+  ],
+  AUTHORIZED_OFFICIAL: [
+    "Dashboard",
+    "Operational Analytics",
+    "Approval Center",
+    "Recommendations",
+    "Block Planning",
+    "Safety",
+    "ML Predictions",
+    "Block Execution",
+    "Resources",
+    "Cross-Department Integration",
+    "Digital Twin",
+    "What-If Simulation",
+    "Emergency Dashboard",
+    "Emergency Incidents",
+    "Railway Map",
+    "Notifications",
+    "Profile",
+  ],
+  EMERGENCY_OPERATOR: [
+    "Dashboard",
+    "Emergency Dashboard",
+    "Emergency Incidents",
+    "Railway Map",
+    "Resources",
+    "Notifications",
+    "Profile",
+  ],
 };
 
 export default function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
   const pathname = usePathname();
   const { user } = useAuth();
-  const allowed = user ? ROLE_VISIBLE[user.role] : undefined;
+  const allowed = user ? (ROLE_VISIBLE[user.role] || []) : [];
   const { unread } = useNotifications();
+
+  // Filter sections and items based on current authenticated user's role
+  const filteredSections = ALL_SECTIONS.map((section) => {
+    const visibleItems = section.items.filter((item) =>
+      user ? allowed.includes(item.label) : true
+    );
+    return {
+      ...section,
+      items: visibleItems,
+    };
+  }).filter((section) => section.items.length > 0);
 
   return (
     <>
       <aside className={`gov-sidebar${open ? " open" : ""}`} aria-label="Primary navigation">
-        {SECTIONS.map((s) => (
+        {filteredSections.map((s) => (
           <div key={s.title} className={`gov-side-section${s.title === "Account" ? " gov-side-section-account" : ""}`}>
             <div className="gov-side-section-title">{s.title}</div>
             <ul>
               {s.items.map((i) => {
                 const isActive = pathname === i.href || pathname.startsWith(i.href + "/");
-                // Demo mode: every module stays visible. Items outside the
-                // role's authorized set carry a subtle lock marker only —
-                // the backend still enforces the real permission.
-                const locked = allowed ? !allowed.includes(i.label) : false;
                 return (
                   <li key={i.href}>
                     <Link
                       href={i.href}
                       onClick={onClose}
-                      className={`${isActive ? "active" : ""}${locked ? " restricted" : ""}`}
+                      className={isActive ? "active" : ""}
                       aria-current={isActive ? "page" : undefined}
-                      aria-label={locked ? `${i.label} (restricted for your role)` : i.label}
+                      aria-label={i.label}
                     >
                       <span className="gov-side-icon" aria-hidden="true">{i.icon}</span>
                       {i.label}
-                      {locked ? (
-                        <span className="gov-side-lock" aria-hidden="true" title="Restricted for your role">🔒</span>
-                      ) : null}
                       {i.label === "Notifications" && unread != null && unread > 0 ? (
-                        <span className="badge badge-red" style={{ marginLeft: locked ? 0 : "auto", fontSize: "10px", padding: "1px 7px" }}>
+                        <span className="badge badge-red" style={{ marginLeft: "auto", fontSize: "10px", padding: "1px 7px" }}>
                           {unread}
                         </span>
                       ) : null}
@@ -133,7 +211,10 @@ export default function Sidebar({ open, onClose }: { open: boolean; onClose: () 
             </ul>
           </div>
         ))}
-        <p className="gov-side-note">Demo mode: all modules visible. Access control enforced by backend.</p>
+        <div style={{ marginTop: "auto", padding: "12px 14px", borderTop: "1px solid var(--border, #e2e8f0)", fontSize: "11px", color: "var(--text-secondary, #64748b)" }}>
+          <div><strong>Role:</strong> {user?.role || "Guest"}</div>
+          <div><strong>Dept:</strong> {user?.department || "N/A"}</div>
+        </div>
       </aside>
       {open ? <button className="gov-scrim" aria-label="Close menu" onClick={onClose} /> : null}
     </>
